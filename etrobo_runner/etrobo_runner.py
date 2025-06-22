@@ -27,6 +27,7 @@ class Runner(Node):
 
         self.luminance = 0.0
         self.prev_error = 0.0
+        self.color_received = False
 
         self.threshold = self.declare_parameter('threshold', 0.5).value
         self.kp = self.declare_parameter('kp', 1.0).value
@@ -38,15 +39,22 @@ class Runner(Node):
     def color_callback(self, msg: ColorRGBA) -> None:
         """Store the received luminance value."""
         self.luminance = float(msg.a)
+        self.color_received = True
 
     def publish_cmd_vel(self) -> None:
         """Publish Twist message based on PD control."""
+        twist = Twist()
+        if not self.color_received:
+            twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            self.publisher_.publish(twist)
+            return
+
         error = self.luminance - self.threshold
         derivative = (error - self.prev_error) / self.timer_period
         angular = self.kp * error + self.kd * derivative
         self.prev_error = error
 
-        twist = Twist()
         twist.linear.x = 0.2
         twist.angular.z = angular
         self.publisher_.publish(twist)
