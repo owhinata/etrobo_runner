@@ -8,4 +8,5 @@
   - The steering angle is determined by a PD controller using **sensor value − threshold** as the error.
     The derivative term is computed from the change in error between control intervals.
   - Threshold and gain parameters are configurable via ROS 2 parameters.
+  - The vehicle remains stationary until the first `/color` message is received.
 
