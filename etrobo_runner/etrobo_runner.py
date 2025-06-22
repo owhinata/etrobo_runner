@@ -56,9 +56,12 @@ def main() -> None:
     """Entry point for the runner node."""
     rclpy.init()
     runner = Runner()
-    rclpy.spin(runner)
+    try:
+        rclpy.spin(runner)
+    except KeyboardInterrupt:
+        pass
     runner.destroy_node()
-    rclpy.shutdown()
+    rclpy.try_shutdown()
 
 
 if __name__ == '__main__':
