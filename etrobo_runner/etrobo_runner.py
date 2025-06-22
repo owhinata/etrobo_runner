@@ -2,6 +2,7 @@
 
 from geometry_msgs.msg import Twist
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from std_msgs.msg import ColorRGBA
 import rclpy
 
@@ -23,7 +24,12 @@ class Runner(Node):
         """Initialize subscriptions, publishers and timer."""
         super().__init__('etrobo_runner')
         self.publisher_ = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.create_subscription(ColorRGBA, '/color', self.color_callback, 10)
+        self.create_subscription(
+            ColorRGBA,
+            '/color',
+            self.color_callback,
+            qos_profile_sensor_data,
+        )
 
         self.luminance = 0.0
         self.prev_error = 0.0
