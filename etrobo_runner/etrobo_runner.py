@@ -1,4 +1,3 @@
-
 """Runner node for a two-wheeled robot."""
 
 from geometry_msgs.msg import Twist
@@ -8,7 +7,17 @@ import rclpy
 
 
 class Runner(Node):
-    """ROS2 node that drives a two-wheeled robot."""
+    """ROS2 node that drives a two-wheeled robot.
+
+    Parameters
+    ----------
+    threshold : float
+        Luminance threshold for the PD controller.
+    kp : float
+        Proportional gain.
+    kd : float
+        Derivative gain.
+    """
 
     def __init__(self) -> None:
         """Initialize subscriptions, publishers and timer."""
@@ -19,9 +28,9 @@ class Runner(Node):
         self.luminance = 0.0
         self.prev_error = 0.0
 
-        self.threshold = 0.5
-        self.kp = 1.0
-        self.kd = 0.0
+        self.threshold = self.declare_parameter('threshold', 0.5).value
+        self.kp = self.declare_parameter('kp', 1.0).value
+        self.kd = self.declare_parameter('kd', 0.0).value
 
         self.timer_period = 0.01
         self.create_timer(self.timer_period, self.publish_cmd_vel)
