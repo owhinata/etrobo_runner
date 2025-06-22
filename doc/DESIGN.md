@@ -5,5 +5,6 @@
   - `R`, `G`, and `B` fields contain standard color values (`0.0–1.0`).  
   - The `A` field holds the luminance value (`0.0–1.0`).  
   - If luminance is below a threshold (dark), steer left; if above the threshold (bright), steer right.  
-  - The steering angle is determined by a PI controller using **sensor value − threshold** as the control input.
+  - The steering angle is determined by a PD controller using **sensor value − threshold** as the error.
+    The derivative term is computed from the change in error between control intervals.
 
