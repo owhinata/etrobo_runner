@@ -36,8 +36,8 @@ class Runner(Node):
         self.color_received = False
 
         self.threshold = self.declare_parameter('threshold', 0.46).value
-        self.kp = self.declare_parameter('kp', -0.2).value
-        self.kd = self.declare_parameter('kd', -5.0).value
+        self.kp = self.declare_parameter('kp', -0.64).value
+        self.kd = self.declare_parameter('kd', -1.2).value
 
         self.timer_period = 0.01
         self.create_timer(self.timer_period, self.publish_cmd_vel)
@@ -64,7 +64,7 @@ class Runner(Node):
         print(f' {self.luminance:.3f}, {error:.3f}, {derivative:.3f}, '
               f'{angular:.3f}')
 
-        twist.linear.x = 0.06
+        twist.linear.x = 0.05
         twist.angular.z = angular
         self.publisher_.publish(twist)
 
