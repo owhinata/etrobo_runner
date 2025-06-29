@@ -9,12 +9,13 @@ r sensor.
 - Publishes velocity commands as `geometry_msgs/msg/Twist` messages on `/cmd_vel`.
 - Uses PD control on luminance error to steer the robot along a line.
 - Configurable parameters for luminance threshold, proportional gain (kp), and derivative gain (kd).
-- Constant forward linear velocity.
+- Constant forward linear velocity set via a parameter.
 
 ## Parameters
 - `threshold` (float): Luminance threshold for the controller, default 0.46.
 - `kp` (float): Proportional gain, default -0.64.
 - `kd` (float): Derivative gain, default -1.2.
+- `speed` (float): Forward linear velocity, default 0.05.
 
 ## Usage
 Run the node using ROS2 launch or directly with:
