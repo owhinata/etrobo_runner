@@ -32,6 +32,12 @@ For simulation:
 - Scope: optional short scope in parentheses (e.g., `feat(ui): ...`).  
 - Formatting: no trailing period in title; separate title/body with a blank line.  
 
+## Git Hooks
+- The repo includes a `pre-commit` hook at `.githooks/pre-commit` that runs
+  `clang-format` on staged C/C++ files and restages them.  
+- To enable it, run: `bash scripts/setup-git-hooks.sh` (once per clone).  
+- Requires `clang-format` to be installed and available in `PATH`.  
+
 ## Documentation
 - Write all documentation, code comments, and branch names in **English**.  
 - If the design policy changes, **update `doc/DESIGN.md` as well**.
