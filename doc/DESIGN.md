@@ -6,9 +6,21 @@
 - Execution mode: subscribes to topics only (no file mode).
 - Latency policy: prioritize the latest image. Do not abort a frame once processing has started; always finish the current frame.
 
+## Startup Calibration
+- States:
+  - `CalibratePitch` (initial): enable temporal smoothing; do not publish `~lines`; estimate camera pitch from a gray circle at a known ground distance using `~camera_info` intrinsics.
+  - `Ready`: disable temporal smoothing; publish `~lines` and `~markers` normally.
+- Parameters:
+  - `camera_info_topic` (string; default: `camera_info`)
+  - `camera_height_meters` (double; default: `0.2`)
+  - `landmark_distance_meters` (double; default: `0.7`)
+  - `calib_timeout_sec` (double; default: `60.0`)
+  - Uses an internal buffer of landmark detections (median of ~10 samples) to robustly estimate pitch.
+
 ## Topics
 - Input
   - `~image` (`sensor_msgs/msg/Image`): subscribe via `image_transport` (raw recommended)
+  - `~camera_info` (`sensor_msgs/msg/CameraInfo`): intrinsics for calibration
 - Output
   - `~image_with_lines` (`sensor_msgs/msg/Image`): debug image with detected lines overlaid (BGR8)
   - `~lines` (`std_msgs/msg/Float32MultiArray`): detected line segments, each as `[x1, y1, x2, y2]` in a flat array
@@ -82,6 +94,13 @@ Algorithm: per frame, greedily match detections to existing tracks using endpoin
    - `standard`: use `cv::HoughLines` to obtain (rho, theta), then extend to image borders to form segments
 6. Invert ROI/downscale to restore coordinates to the original scale.
 7. Draw overlays → publish `image_with_lines`, and publish `lines` and `markers`.
+
+### Calibration math (summary)
+- Let `v` be the median image row of the gray circle center (pixels), `fy, cy` from camera intrinsics, `u = (v - cy)/fy`.
+- Let `h` be camera height [m], `D` the known forward ground distance to the circle [m].
+- From a pinhole model with pitch `θ` (downward positive), ray–ground intersection yields:
+  - `tan(θ) = (D * u - h) / (D + h * u)` and `θ = atan(tan(θ))`.
+  - Clamp to a plausible range (±45 deg) and transition to Ready.
 
 ## Timing Logs (steady_clock)
 - Capture `std::chrono::steady_clock::now()` at the start of the image callback.

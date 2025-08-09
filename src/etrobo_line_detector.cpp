@@ -12,6 +12,7 @@
 #include <rclcpp/qos.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <string>
@@ -27,6 +28,7 @@ class LineDetectorNode : public rclcpp::Node {
     sanitize_parameters();
     setup_publishers();
     setup_subscription();
+    setup_camera_info_subscription();
     setup_parameter_callback();
 
     RCLCPP_INFO(this->get_logger(),
@@ -37,6 +39,8 @@ class LineDetectorNode : public rclcpp::Node {
  private:
   void declare_parameters() {
     image_topic_ = this->declare_parameter<std::string>("image_topic", "image");
+    camera_info_topic_ = this->declare_parameter<std::string>(
+        "camera_info_topic", "camera_info");
     use_color_output_ = this->declare_parameter<bool>("use_color_output", true);
     publish_image_ =
         this->declare_parameter<bool>("publish_image_with_lines", false);
@@ -94,6 +98,14 @@ class LineDetectorNode : public rclcpp::Node {
         this->declare_parameter<double>("match_max_angle_deg", 10.0);
     min_age_to_publish_ = this->declare_parameter<int>("min_age_to_publish", 2);
     max_missed_ = this->declare_parameter<int>("max_missed", 3);
+
+    // Calibration parameters
+    camera_height_m_ =
+        this->declare_parameter<double>("camera_height_meters", 0.2);
+    landmark_distance_m_ =
+        this->declare_parameter<double>("landmark_distance_meters", 0.7);
+    calib_timeout_sec_ =
+        this->declare_parameter<double>("calib_timeout_sec", 60.0);
   }
 
   void setup_publishers() {
@@ -120,6 +132,13 @@ class LineDetectorNode : public rclcpp::Node {
     image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
         image_topic_, qos,
         std::bind(&LineDetectorNode::image_callback, this, _1));
+  }
+
+  void setup_camera_info_subscription() {
+    // CameraInfo is low rate; default QoS reliable
+    camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+        camera_info_topic_, rclcpp::QoS(10),
+        std::bind(&LineDetectorNode::camera_info_callback, this, _1));
   }
 
   void setup_parameter_callback() {
@@ -495,7 +514,18 @@ class LineDetectorNode : public rclcpp::Node {
           // resubscription
           result.successful = false;
           result.reason = "Changing image_topic at runtime is not supported";
+        } else if (name == "camera_info_topic") {
+          result.successful = false;
+          result.reason =
+              "Changing camera_info_topic at runtime is not supported";
         }
+        // Calibration params
+        else if (name == "camera_height_meters")
+          camera_height_m_ = p.as_double();
+        else if (name == "landmark_distance_meters")
+          landmark_distance_m_ = p.as_double();
+        else if (name == "calib_timeout_sec")
+          calib_timeout_sec_ = p.as_double();
       } catch (const std::exception &e) {
         result.successful = false;
         result.reason = e.what();
@@ -591,6 +621,12 @@ class LineDetectorNode : public rclcpp::Node {
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
     const auto t0 = std::chrono::steady_clock::now();
 
+    // Initialize calibration timer on first frame
+    if (!calib_started_) {
+      calib_started_ = true;
+      calib_start_time_ = this->now();
+    }
+
     // Step 1: Preprocess image
     cv::Mat img;
     cv::Rect roi_rect;
@@ -613,13 +649,27 @@ class LineDetectorNode : public rclcpp::Node {
 
     // Step 6: Apply temporal smoothing
     std::vector<cv::Vec4i> segments_out =
-        apply_temporal_smoothing(segments_full);
+        apply_temporal_smoothing_stateful(segments_full);
 
     // Step 7: Publish results
     std_msgs::msg::Header header = msg->header;
     publish_visualization(segments_out, img, header);
-    publish_lines_data(segments_out);
+    if (state_ == State::Ready) {
+      publish_lines_data(segments_out);
+    }
     publish_markers(segments_out, header);
+
+    // Calibration mode processing (detect gray circle and estimate pitch)
+    if (state_ == State::CalibratePitch) {
+      double v_full = 0.0;
+      if (detect_landmark_row_v(gray, roi_rect, scale, v_full)) {
+        v_samples_.push_back(v_full);
+        if (v_samples_.size() > kMaxCalibSamples) {
+          v_samples_.erase(v_samples_.begin());
+        }
+      }
+      try_finalize_calibration();
+    }
 
     // Step 8: Log timing
     const auto t1 = std::chrono::steady_clock::now();
@@ -629,6 +679,24 @@ class LineDetectorNode : public rclcpp::Node {
             .count();
     RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
                 segments_out.size(), ms);
+  }
+
+  // State-dependent smoothing: force on during calibration, off if disabled
+  // later
+  std::vector<cv::Vec4i> apply_temporal_smoothing_stateful(
+      const std::vector<cv::Vec4i> &segments_full) {
+    const bool smoothing =
+        (state_ == State::CalibratePitch) ? true : enable_temporal_smoothing_;
+    std::vector<cv::Vec4i> segments_out;
+    if (smoothing) {
+      segments_out = update_tracks_and_build_output(segments_full);
+      if (segments_out.empty() && !segments_full.empty()) {
+        segments_out = segments_full;
+      }
+    } else {
+      segments_out = segments_full;
+    }
+    return segments_out;
   }
 
   // ===== Temporal smoothing implementation =====
@@ -776,8 +844,111 @@ class LineDetectorNode : public rclcpp::Node {
     return out;
   }
 
+  // ===== Calibration: camera pitch estimation =====
+  enum class State { CalibratePitch, Ready };
+
+  void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+    if (msg->k.size() >= 9) {
+      fx_ = msg->k[0];
+      fy_ = msg->k[4];
+      cx_ = msg->k[2];
+      cy_ = msg->k[5];
+      has_cam_info_ = true;
+    } else if (msg->p.size() >= 12) {
+      fx_ = msg->p[0];
+      fy_ = msg->p[5];
+      cx_ = msg->p[2];
+      cy_ = msg->p[6];
+      has_cam_info_ = true;
+    }
+  }
+
+  bool detect_landmark_row_v(const cv::Mat &gray_work, const cv::Rect &roi,
+                             double scale, double &v_full_out) {
+    if (gray_work.empty()) return false;
+    cv::Mat blur;
+    cv::GaussianBlur(gray_work, blur, cv::Size(7, 7), 2.0);
+    std::vector<cv::Vec3f> circles;
+    // dp=1.5, minDist rows/4, param1/2 tuned conservatively
+    cv::HoughCircles(blur, circles, cv::HOUGH_GRADIENT, 1.5,
+                     std::max(1, blur.rows / 4), 100, 20, 3, 0);
+    if (circles.empty()) return false;
+    // Pick the largest radius circle
+    size_t best_idx = 0;
+    float best_r = circles[0][2];
+    for (size_t i = 1; i < circles.size(); ++i) {
+      if (circles[i][2] > best_r) {
+        best_r = circles[i][2];
+        best_idx = i;
+      }
+    }
+    const float cy_work = circles[best_idx][1];
+    // Map to full image row index
+    const double v_full =
+        std::round(static_cast<double>(cy_work) * scale) + roi.y;
+    v_full_out = v_full;
+    return true;
+  }
+
+  static double median(std::vector<double> v) {
+    if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
+    const size_t n = v.size();
+    std::nth_element(v.begin(), v.begin() + n / 2, v.end());
+    double m = v[n / 2];
+    if ((n % 2) == 0) {
+      auto max_it = std::max_element(v.begin(), v.begin() + n / 2);
+      m = (m + *max_it) * 0.5;
+    }
+    return m;
+  }
+
+  void try_finalize_calibration() {
+    // Timeout check
+    if (calib_started_ && calib_timeout_sec_ > 0.0) {
+      const rclcpp::Duration elapsed = this->now() - calib_start_time_;
+      if (elapsed.seconds() >= calib_timeout_sec_) {
+        RCLCPP_WARN(this->get_logger(),
+                    "Calibration timeout after %.1fs. Proceed without pitch.",
+                    calib_timeout_sec_);
+        transition_to_ready(/*pitch_rad=*/0.0);
+        return;
+      }
+    }
+
+    if (!has_cam_info_) return;
+    if (v_samples_.size() < kMinCalibSamples) return;
+
+    const double v_med = median(v_samples_);
+    // Compute u = (v - cy)/fy
+    const double u = (v_med - cy_) / fy_;
+    const double D = landmark_distance_m_;
+    const double h = camera_height_m_;
+    // tan(theta) = (D*u - h) / (D + h*u)
+    const double denom = (D + h * u);
+    if (std::abs(denom) < 1e-6) return;  // avoid singularities
+    const double t = (D * u - h) / denom;
+    const double theta = std::atan(t);
+
+    // Sanity clamp to [-45, 45] deg
+    const double max_rad = 45.0 * CV_PI / 180.0;
+    const double pitch_rad = std::max(-max_rad, std::min(theta, max_rad));
+    transition_to_ready(pitch_rad);
+  }
+
+  void transition_to_ready(double pitch_rad) {
+    estimated_pitch_rad_ = pitch_rad;
+    state_ = State::Ready;
+    // Disable smoothing per requirement after calibration
+    enable_temporal_smoothing_ = false;
+
+    RCLCPP_INFO(this->get_logger(),
+                "Calibration finished. Estimated pitch: %.2f deg (%.4f rad)",
+                estimated_pitch_rad_ * 180.0 / CV_PI, estimated_pitch_rad_);
+  }
+
   // Parameters
   std::string image_topic_;
+  std::string camera_info_topic_;
   bool use_color_output_{};
   bool publish_image_{};
   bool grayscale_{};
@@ -827,8 +998,27 @@ class LineDetectorNode : public rclcpp::Node {
   std::vector<Track> tracks_;
   int next_track_id_{};
 
+  // Calibration / camera model
+  State state_{State::CalibratePitch};
+  bool has_cam_info_{false};
+  double fx_{};
+  double fy_{};
+  double cx_{};
+  double cy_{};
+  double camera_height_m_{};
+  double landmark_distance_m_{};
+  double calib_timeout_sec_{};
+  double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
+  bool calib_started_{false};
+  rclcpp::Time calib_start_time_{};
+  std::vector<double> v_samples_{};
+  static constexpr size_t kMinCalibSamples = 10;
+  static constexpr size_t kMaxCalibSamples = 30;
+
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr
+      camera_info_sub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr lines_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr

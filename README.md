@@ -4,6 +4,7 @@ A ROS 2 C++ node that detects straight lines using Canny + Hough transform and p
 
 ## Features
 - **Line Detection**: Canny edge detection + Hough transform with temporal smoothing
+- **Startup Calibration**: Estimates camera pitch using a known landmark distance, then switches to normal publishing
 - **Low Latency**: Never drops the frame being processed; subscription queue keeps only the latest frame (QoS depth = 1)
 - **Flexible Parameters**: Dynamically tune Canny/Hough, pre-processing, and visualization parameters
 - **Multiple Outputs**: Publishes detection results as arrays, visualization images, and RViz markers
@@ -44,6 +45,7 @@ ros2 run etrobo_line_detector etrobo_line_detector
 ros2 run etrobo_line_detector etrobo_line_detector \
   --ros-args \
   -p image_topic:=/camera/image_raw \
+  -p camera_info_topic:=/camera/camera_info \
   -p canny_low:=80 -p canny_high:=200 \
   -p hough_type:=probabilistic \
   -p publish_image_with_lines:=true
@@ -70,6 +72,7 @@ The GUI provides:
 
 ## Topics
 - **Input**: `~image` (`sensor_msgs/msg/Image`) — source camera image
+  - `~camera_info` (`sensor_msgs/msg/CameraInfo`) — camera intrinsics for calibration
 - **Output**:
   - `/image_with_lines` (`sensor_msgs/msg/Image`) — visualization with detected lines overlaid
   - `/lines` (`std_msgs/msg/Float32MultiArray`) — line segments as flat `[x1, y1, x2, y2, ...]` array  
@@ -77,6 +80,7 @@ The GUI provides:
 
 ## Parameters (excerpt)
 - **I/O**: `image_topic`, `use_color_output`, `publish_image_with_lines`
+- **Calibration**: `camera_info_topic` (string), `camera_height_meters` (double; default 0.2), `landmark_distance_meters` (double; default 0.7), `calib_timeout_sec` (double; default 60.0)
 - **Pre-processing**: `grayscale`, `blur_ksize`, `blur_sigma`, `roi`, `downscale`
 - **Canny Edge**: `canny_low`, `canny_high`, `canny_aperture`, `canny_L2gradient`
 - **Hough Transform**: `hough_type`, `rho`, `theta_deg`, `threshold`, `min_line_length`, `max_line_gap`
@@ -86,6 +90,14 @@ The GUI provides:
 - **Visualization**: `draw_color_bgr`, `draw_thickness`, `publish_markers`
 
 See [doc/DESIGN.md](doc/DESIGN.md) for complete parameter documentation.
+
+## Startup Calibration
+- On startup the node enters CalibratePitch state:
+  - Enables temporal smoothing, does not publish the `lines` topic.
+  - Detects the gray start-circle and collects several detections.
+  - Computes camera pitch using camera intrinsics, known camera height, and known landmark distance.
+  - Transitions to Ready, disables temporal smoothing, and starts publishing `lines`.
+  - If calibration times out (`calib_timeout_sec`), the node proceeds with a 0 rad pitch.
 
 ## GUI Parameter Categories
 The Python GUI organizes parameters into 8 intuitive sections:
@@ -100,4 +112,3 @@ The Python GUI organizes parameters into 8 intuitive sections:
 
 ## License
 This project follows the repository’s license policy.
-
