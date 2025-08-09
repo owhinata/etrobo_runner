@@ -31,17 +31,26 @@
   - `roi` (int[4]; default: `[-1, -1, -1, -1]`) `[x, y, w, h]` (disabled when -1)
   - `downscale` (double; default: `1.0`) `> 0`; 1.0 disables downscaling
 - Canny
-  - `canny_low` (int; default: `50`), `canny_high` (int; default: `150`)
+  - `canny_low` (int; default: `40`), `canny_high` (int; default: `120`)
   - `canny_aperture` (int; default: `3`) allowed: 3, 5, 7
   - `canny_L2gradient` (bool; default: `false`)
 - Hough
   - `hough_type` (string; `probabilistic` | `standard`; default: `probabilistic`)
   - Common: `rho` (double; `1.0`), `theta_deg` (double; `1.0`), `threshold` (int; `50`)
-  - probabilistic: `min_line_length` (double; `50`), `max_line_gap` (double; `10`)
+  - probabilistic: `min_line_length` (double; `30`), `max_line_gap` (double; `10`)
   - standard: `min_theta_deg` (double; `0`), `max_theta_deg` (double; `180`)
 - Visualization
   - `draw_color_bgr` (int[3]; default: `[0, 255, 0]`), `draw_thickness` (int; default: `2`)
   - `publish_markers` (bool; default: `true`)
+
+## HSV Mask (optional)
+- `use_hsv_mask` (bool; default: `true`): enable HSV masking after Canny to isolate the black center line.
+- Thresholds:
+  - `hsv_lower_h` (int; default: `0`), `hsv_lower_s` (int; default: `0`), `hsv_lower_v` (int; default: `0`)
+  - `hsv_upper_h` (int; default: `180`), `hsv_upper_s` (int; default: `120`), `hsv_upper_v` (int; default: `150`)
+- Morphology:
+  - `hsv_dilate_kernel` (int; default: `3`): odd kernel size.
+  - `hsv_dilate_iter` (int; default: `1`): dilation iterations (0 to disable).
 
 ## Processing Flow
 1. Convert the received image to `cv::Mat` via `cv_bridge`.
@@ -87,4 +96,3 @@
   - `ros2 run etrobo_line_detector etrobo_line_detector`
 - Parameter tuning example:
   - `ros2 run etrobo_line_detector etrobo_line_detector --ros-args -p image_topic:=/camera/image_raw -p canny_low:=80 -p canny_high:=200 -p hough_type:=probabilistic`
-

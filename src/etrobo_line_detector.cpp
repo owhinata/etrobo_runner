@@ -28,14 +28,15 @@ class LineDetectorNode : public rclcpp::Node {
     use_color_output_ = this->declare_parameter<bool>("use_color_output", true);
 
     grayscale_ = this->declare_parameter<bool>("grayscale", true);
+    use_hsv_mask_ = this->declare_parameter<bool>("use_hsv_mask", true);
     blur_ksize_ = this->declare_parameter<int>("blur_ksize", 5);
     blur_sigma_ = this->declare_parameter<double>("blur_sigma", 1.5);
     roi_ = this->declare_parameter<std::vector<int64_t>>(
         "roi", std::vector<int64_t>{-1, -1, -1, -1});
     downscale_ = this->declare_parameter<double>("downscale", 1.0);
 
-    canny_low_ = this->declare_parameter<int>("canny_low", 50);
-    canny_high_ = this->declare_parameter<int>("canny_high", 150);
+    canny_low_ = this->declare_parameter<int>("canny_low", 40);
+    canny_high_ = this->declare_parameter<int>("canny_high", 120);
     canny_aperture_ = this->declare_parameter<int>("canny_aperture", 3);
     canny_L2gradient_ =
         this->declare_parameter<bool>("canny_L2gradient", false);
@@ -45,7 +46,7 @@ class LineDetectorNode : public rclcpp::Node {
     rho_ = this->declare_parameter<double>("rho", 1.0);
     theta_deg_ = this->declare_parameter<double>("theta_deg", 1.0);
     threshold_ = this->declare_parameter<int>("threshold", 50);
-    min_line_length_ = this->declare_parameter<double>("min_line_length", 50.0);
+    min_line_length_ = this->declare_parameter<double>("min_line_length", 30.0);
     max_line_gap_ = this->declare_parameter<double>("max_line_gap", 10.0);
     min_theta_deg_ = this->declare_parameter<double>("min_theta_deg", 0.0);
     max_theta_deg_ = this->declare_parameter<double>("max_theta_deg", 180.0);
@@ -54,6 +55,16 @@ class LineDetectorNode : public rclcpp::Node {
         "draw_color_bgr", std::vector<int64_t>{0, 255, 0});
     draw_thickness_ = this->declare_parameter<int>("draw_thickness", 2);
     publish_markers_ = this->declare_parameter<bool>("publish_markers", true);
+
+    // HSV mask parameters
+    hsv_lower_h_ = this->declare_parameter<int>("hsv_lower_h", 0);
+    hsv_lower_s_ = this->declare_parameter<int>("hsv_lower_s", 0);
+    hsv_lower_v_ = this->declare_parameter<int>("hsv_lower_v", 0);
+    hsv_upper_h_ = this->declare_parameter<int>("hsv_upper_h", 180);
+    hsv_upper_s_ = this->declare_parameter<int>("hsv_upper_s", 120);
+    hsv_upper_v_ = this->declare_parameter<int>("hsv_upper_v", 150);
+    hsv_dilate_kernel_ = this->declare_parameter<int>("hsv_dilate_kernel", 3);
+    hsv_dilate_iter_ = this->declare_parameter<int>("hsv_dilate_iter", 1);
 
     // Validate parameters minimally
     sanitize_parameters();
@@ -105,6 +116,22 @@ class LineDetectorNode : public rclcpp::Node {
     if (min_theta_deg_ > max_theta_deg_)
       std::swap(min_theta_deg_, max_theta_deg_);
     if (draw_color_bgr_.size() != 3) draw_color_bgr_ = {0, 255, 0};
+    // HSV boundaries and morphology
+    auto clamp = [](int v, int lo, int hi) {
+      return std::max(lo, std::min(v, hi));
+    };
+    hsv_lower_h_ = clamp(hsv_lower_h_, 0, 180);
+    hsv_upper_h_ = clamp(hsv_upper_h_, 0, 180);
+    hsv_lower_s_ = clamp(hsv_lower_s_, 0, 255);
+    hsv_upper_s_ = clamp(hsv_upper_s_, 0, 255);
+    hsv_lower_v_ = clamp(hsv_lower_v_, 0, 255);
+    hsv_upper_v_ = clamp(hsv_upper_v_, 0, 255);
+    if (hsv_lower_h_ > hsv_upper_h_) std::swap(hsv_lower_h_, hsv_upper_h_);
+    if (hsv_lower_s_ > hsv_upper_s_) std::swap(hsv_lower_s_, hsv_upper_s_);
+    if (hsv_lower_v_ > hsv_upper_v_) std::swap(hsv_lower_v_, hsv_upper_v_);
+    if (hsv_dilate_kernel_ < 1) hsv_dilate_kernel_ = 1;
+    if ((hsv_dilate_kernel_ % 2) == 0) hsv_dilate_kernel_ += 1;  // make odd
+    if (hsv_dilate_iter_ < 0) hsv_dilate_iter_ = 0;
   }
 
   rcl_interfaces::msg::SetParametersResult on_parameters_set(
@@ -121,6 +148,8 @@ class LineDetectorNode : public rclcpp::Node {
           use_color_output_ = p.as_bool();
         else if (name == "grayscale")
           grayscale_ = p.as_bool();
+        else if (name == "use_hsv_mask")
+          use_hsv_mask_ = p.as_bool();
         else if (name == "blur_ksize")
           blur_ksize_ = p.as_int();
         else if (name == "blur_sigma")
@@ -160,6 +189,23 @@ class LineDetectorNode : public rclcpp::Node {
           draw_thickness_ = p.as_int();
         else if (name == "publish_markers")
           publish_markers_ = p.as_bool();
+        // HSV mask params
+        else if (name == "hsv_lower_h")
+          hsv_lower_h_ = p.as_int();
+        else if (name == "hsv_lower_s")
+          hsv_lower_s_ = p.as_int();
+        else if (name == "hsv_lower_v")
+          hsv_lower_v_ = p.as_int();
+        else if (name == "hsv_upper_h")
+          hsv_upper_h_ = p.as_int();
+        else if (name == "hsv_upper_s")
+          hsv_upper_s_ = p.as_int();
+        else if (name == "hsv_upper_v")
+          hsv_upper_v_ = p.as_int();
+        else if (name == "hsv_dilate_kernel")
+          hsv_dilate_kernel_ = p.as_int();
+        else if (name == "hsv_dilate_iter")
+          hsv_dilate_iter_ = p.as_int();
         else if (name == "image_topic") {
           // Do not allow changing topic at runtime as it requires
           // resubscription
@@ -326,6 +372,25 @@ class LineDetectorNode : public rclcpp::Node {
     cv::Mat edges;
     cv::Canny(gray, edges, canny_low_, canny_high_, canny_aperture_,
               canny_L2gradient_);
+    // Optional HSV mask AFTER Canny to avoid weakening edges before gradient
+    if (use_hsv_mask_) {
+      cv::Mat hsv_src;
+      if (work.channels() == 1) {
+        cv::cvtColor(work, hsv_src, cv::COLOR_GRAY2BGR);
+        cv::cvtColor(hsv_src, hsv_src, cv::COLOR_BGR2HSV);
+      } else {
+        cv::cvtColor(work, hsv_src, cv::COLOR_BGR2HSV);
+      }
+      const cv::Scalar lower(0, 0, 0);
+      const cv::Scalar upper(180, 120, 150);  // wider S/V to keep near-black
+      cv::Mat mask;
+      cv::inRange(hsv_src, lower, upper, mask);
+      // Thicken mask slightly so boundary edges survive masking
+      cv::Mat kernel =
+          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+      cv::dilate(mask, mask, kernel, cv::Point(-1, -1), 1);
+      cv::bitwise_and(edges, mask, edges);
+    }
 
     // Hough
     std::vector<cv::Vec4i> segments;
@@ -417,6 +482,7 @@ class LineDetectorNode : public rclcpp::Node {
   std::string image_topic_;
   bool use_color_output_{};
   bool grayscale_{};
+  bool use_hsv_mask_{};
   int blur_ksize_{};
   double blur_sigma_{};
   std::vector<int64_t> roi_{};  // x,y,w,h (-1 = disabled)
@@ -436,6 +502,16 @@ class LineDetectorNode : public rclcpp::Node {
   std::vector<int64_t> draw_color_bgr_{};
   int draw_thickness_{};
   bool publish_markers_{};
+
+  // HSV mask parameters
+  int hsv_lower_h_{};
+  int hsv_lower_s_{};
+  int hsv_lower_v_{};
+  int hsv_upper_h_{};
+  int hsv_upper_s_{};
+  int hsv_upper_v_{};
+  int hsv_dilate_kernel_{};
+  int hsv_dilate_iter_{};
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
