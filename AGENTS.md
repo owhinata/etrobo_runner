@@ -15,6 +15,7 @@ For simulation:
 - Language: Python and C++  
 - Follow the PEP 8 coding style.  
 - Follow the Google C++ Style Guide.
+- Run the code formatter before committing (C++: `clang-format` using the repo `.clang-format`).
 - When adding new features, make only the minimum necessary changes.  
   Refactoring (e.g., variable renaming or other code improvements) is **not** allowed unless explicitly requested.
 - The pull-request description **must include** the following sections:
@@ -28,4 +29,3 @@ For simulation:
 
 ## Testing
 Run the following after making changes:
-
