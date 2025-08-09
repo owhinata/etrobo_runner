@@ -129,7 +129,8 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
-                          cv::Mat& original_img, cv::Rect& roi_rect, double& scale) {
+                           cv::Mat &original_img, cv::Rect &roi_rect,
+                           double &scale) {
     // Convert to cv::Mat
     cv_bridge::CvImageConstPtr cv_ptr;
     try {
@@ -197,7 +198,7 @@ class LineDetectorNode : public rclcpp::Node {
     return gray;
   }
 
-  cv::Mat detect_edges(const cv::Mat& gray, const cv::Mat& work) {
+  cv::Mat detect_edges(const cv::Mat &gray, const cv::Mat &work) {
     // Canny
     cv::Mat edges;
     cv::Canny(gray, edges, canny_low_, canny_high_, canny_aperture_,
@@ -233,7 +234,7 @@ class LineDetectorNode : public rclcpp::Node {
     return edges;
   }
 
-  std::vector<cv::Vec4i> detect_lines(const cv::Mat& edges) {
+  std::vector<cv::Vec4i> detect_lines(const cv::Mat &edges) {
     std::vector<cv::Vec4i> segments;
     if (hough_type_ == "standard") {
       std::vector<cv::Vec2f> lines;
@@ -252,8 +253,8 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   std::vector<cv::Vec4i> restore_coordinates(
-      const std::vector<cv::Vec4i>& segments,
-      const cv::Rect& roi_rect, double scale) {
+      const std::vector<cv::Vec4i> &segments, const cv::Rect &roi_rect,
+      double scale) {
     std::vector<cv::Vec4i> segments_full;
     segments_full.reserve(segments.size());
     for (const auto &l : segments) {
@@ -266,9 +267,9 @@ class LineDetectorNode : public rclcpp::Node {
     return segments_full;
   }
 
-  void publish_visualization(const std::vector<cv::Vec4i>& segments,
-                           const cv::Mat& original_img,
-                           const std_msgs::msg::Header& header) {
+  void publish_visualization(const std::vector<cv::Vec4i> &segments,
+                             const cv::Mat &original_img,
+                             const std_msgs::msg::Header &header) {
     if (!image_pub_) return;
 
     cv::Mat vis;
@@ -296,14 +297,13 @@ class LineDetectorNode : public rclcpp::Node {
 
     cv_bridge::CvImage out_img;
     out_img.header = header;
-    out_img.encoding = use_color_output_
-                           ? sensor_msgs::image_encodings::BGR8
-                           : sensor_msgs::image_encodings::MONO8;
+    out_img.encoding = use_color_output_ ? sensor_msgs::image_encodings::BGR8
+                                         : sensor_msgs::image_encodings::MONO8;
     out_img.image = vis;
     image_pub_->publish(*out_img.toImageMsg());
   }
 
-  void publish_lines_data(const std::vector<cv::Vec4i>& segments) {
+  void publish_lines_data(const std::vector<cv::Vec4i> &segments) {
     std_msgs::msg::Float32MultiArray lines_msg;
     lines_msg.layout.dim.resize(1);
     lines_msg.layout.dim[0].label = "lines_flat_xyxy";
@@ -319,7 +319,8 @@ class LineDetectorNode : public rclcpp::Node {
     lines_pub_->publish(lines_msg);
   }
 
-  cv::Mat prepare_work_image(const cv::Mat& img, const cv::Rect& roi_rect, double scale) {
+  cv::Mat prepare_work_image(const cv::Mat &img, const cv::Rect &roi_rect,
+                             double scale) {
     cv::Mat work = img(roi_rect).clone();
     if (downscale_ != 1.0) {
       cv::Mat tmp;
@@ -331,7 +332,7 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   std::vector<cv::Vec4i> apply_temporal_smoothing(
-      const std::vector<cv::Vec4i>& segments_full) {
+      const std::vector<cv::Vec4i> &segments_full) {
     std::vector<cv::Vec4i> segments_out;
     if (enable_temporal_smoothing_) {
       segments_out = update_tracks_and_build_output(segments_full);
@@ -589,14 +590,14 @@ class LineDetectorNode : public rclcpp::Node {
 
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
     const auto t0 = std::chrono::steady_clock::now();
-    
+
     // Step 1: Preprocess image
     cv::Mat img;
     cv::Rect roi_rect;
     double scale;
     cv::Mat gray = preprocess_image(msg, img, roi_rect, scale);
     if (gray.empty()) return;
-    
+
     // Step 2: Prepare work image for edge detection
     cv::Mat work = prepare_work_image(img, roi_rect, scale);
 
@@ -607,10 +608,12 @@ class LineDetectorNode : public rclcpp::Node {
     std::vector<cv::Vec4i> segments = detect_lines(edges);
 
     // Step 5: Restore coordinates to original scale and ROI
-    std::vector<cv::Vec4i> segments_full = restore_coordinates(segments, roi_rect, scale);
+    std::vector<cv::Vec4i> segments_full =
+        restore_coordinates(segments, roi_rect, scale);
 
     // Step 6: Apply temporal smoothing
-    std::vector<cv::Vec4i> segments_out = apply_temporal_smoothing(segments_full);
+    std::vector<cv::Vec4i> segments_out =
+        apply_temporal_smoothing(segments_full);
 
     // Step 7: Publish results
     std_msgs::msg::Header header = msg->header;
