@@ -71,6 +71,16 @@ class LineDetectorNode : public rclcpp::Node {
     edge_close_kernel_ = this->declare_parameter<int>("edge_close_kernel", 3);
     edge_close_iter_ = this->declare_parameter<int>("edge_close_iter", 1);
 
+    // Temporal smoothing (EMA) parameters
+    enable_temporal_smoothing_ =
+        this->declare_parameter<bool>("enable_temporal_smoothing", true);
+    ema_alpha_ = this->declare_parameter<double>("ema_alpha", 0.5);
+    match_max_px_ = this->declare_parameter<int>("match_max_px", 20);
+    match_max_angle_deg_ =
+        this->declare_parameter<double>("match_max_angle_deg", 10.0);
+    min_age_to_publish_ = this->declare_parameter<int>("min_age_to_publish", 2);
+    max_missed_ = this->declare_parameter<int>("max_missed", 3);
+
     // Validate parameters minimally
     sanitize_parameters();
 
@@ -137,6 +147,14 @@ class LineDetectorNode : public rclcpp::Node {
     if (hsv_dilate_kernel_ < 1) hsv_dilate_kernel_ = 1;
     if ((hsv_dilate_kernel_ % 2) == 0) hsv_dilate_kernel_ += 1;  // make odd
     if (hsv_dilate_iter_ < 0) hsv_dilate_iter_ = 0;
+    // Temporal smoothing clamps
+    if (ema_alpha_ < 0.0) ema_alpha_ = 0.0;
+    if (ema_alpha_ > 1.0) ema_alpha_ = 1.0;
+    if (match_max_px_ < 0) match_max_px_ = 0;
+    if (match_max_angle_deg_ < 0.0) match_max_angle_deg_ = 0.0;
+    if (match_max_angle_deg_ > 180.0) match_max_angle_deg_ = 180.0;
+    if (min_age_to_publish_ < 0) min_age_to_publish_ = 0;
+    if (max_missed_ < 0) max_missed_ = 0;
     // Edge closing morphology params
     if (edge_close_kernel_ < 1) edge_close_kernel_ = 1;
     if ((edge_close_kernel_ % 2) == 0) edge_close_kernel_ += 1;  // make odd
@@ -215,6 +233,19 @@ class LineDetectorNode : public rclcpp::Node {
           hsv_dilate_kernel_ = p.as_int();
         else if (name == "hsv_dilate_iter")
           hsv_dilate_iter_ = p.as_int();
+        // Temporal smoothing params
+        else if (name == "enable_temporal_smoothing")
+          enable_temporal_smoothing_ = p.as_bool();
+        else if (name == "ema_alpha")
+          ema_alpha_ = p.as_double();
+        else if (name == "match_max_px")
+          match_max_px_ = p.as_int();
+        else if (name == "match_max_angle_deg")
+          match_max_angle_deg_ = p.as_double();
+        else if (name == "min_age_to_publish")
+          min_age_to_publish_ = p.as_int();
+        else if (name == "max_missed")
+          max_missed_ = p.as_int();
         // Edge closing params
         else if (name == "use_edge_close")
           use_edge_close_ = p.as_bool();
@@ -443,6 +474,18 @@ class LineDetectorNode : public rclcpp::Node {
       segments_full.emplace_back(cv::Vec4i{x1, y1, x2, y2});
     }
 
+    // Temporal smoothing (optional)
+    std::vector<cv::Vec4i> segments_out;
+    if (enable_temporal_smoothing_) {
+      segments_out = update_tracks_and_build_output(segments_full);
+      if (segments_out.empty() && !segments_full.empty()) {
+        // Fallback to raw detections if no stable tracks yet
+        segments_out = segments_full;
+      }
+    } else {
+      segments_out = segments_full;
+    }
+
     // Visualization image
     cv::Mat vis;
     if (use_color_output_) {
@@ -458,7 +501,7 @@ class LineDetectorNode : public rclcpp::Node {
         vis = img.clone();
       }
     }
-    for (const auto &l : segments_full) {
+    for (const auto &l : segments_out) {
       cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
                cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
                           static_cast<int>(draw_color_bgr_[1]),
@@ -479,10 +522,10 @@ class LineDetectorNode : public rclcpp::Node {
     std_msgs::msg::Float32MultiArray lines_msg;
     lines_msg.layout.dim.resize(1);
     lines_msg.layout.dim[0].label = "lines_flat_xyxy";
-    lines_msg.layout.dim[0].size = segments_full.size() * 4;
+    lines_msg.layout.dim[0].size = segments_out.size() * 4;
     lines_msg.layout.dim[0].stride = 1;
-    lines_msg.data.reserve(segments_full.size() * 4);
-    for (const auto &l : segments_full) {
+    lines_msg.data.reserve(segments_out.size() * 4);
+    for (const auto &l : segments_out) {
       lines_msg.data.push_back(static_cast<float>(l[0]));
       lines_msg.data.push_back(static_cast<float>(l[1]));
       lines_msg.data.push_back(static_cast<float>(l[2]));
@@ -491,7 +534,7 @@ class LineDetectorNode : public rclcpp::Node {
     lines_pub_->publish(lines_msg);
 
     // Publish markers (optional)
-    publish_markers(segments_full, header);
+    publish_markers(segments_out, header);
 
     const auto t1 = std::chrono::steady_clock::now();
     const double ms =
@@ -499,7 +542,152 @@ class LineDetectorNode : public rclcpp::Node {
             t1 - t0)
             .count();
     RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
-                segments_full.size(), ms);
+                segments_out.size(), ms);
+  }
+
+  // ===== Temporal smoothing implementation =====
+  struct Track {
+    int id;
+    cv::Point2f p1;
+    cv::Point2f p2;
+    double angle_rad;
+    int age;
+    int missed;
+  };
+
+  static inline double line_angle_rad(const cv::Point2f &a,
+                                      const cv::Point2f &b) {
+    return std::atan2(b.y - a.y, b.x - a.x);
+  }
+
+  static inline double angle_diff_deg(double a_rad, double b_rad) {
+    double d = std::fabs(a_rad - b_rad);
+    while (d > CV_PI) d = std::fabs(d - 2 * CV_PI);
+    return d * 180.0 / CV_PI;
+  }
+
+  static inline double endpoints_min_cost(const cv::Point2f &t1,
+                                          const cv::Point2f &t2,
+                                          const cv::Point2f &d1,
+                                          const cv::Point2f &d2,
+                                          bool &swap_det) {
+    double c1 = cv::norm(t1 - d1) + cv::norm(t2 - d2);
+    double c2 = cv::norm(t1 - d2) + cv::norm(t2 - d1);
+    if (c2 < c1) {
+      swap_det = true;
+      return c2;
+    }
+    swap_det = false;
+    return c1;
+  }
+
+  std::vector<cv::Vec4i> update_tracks_and_build_output(
+      const std::vector<cv::Vec4i> &detections) {
+    // Build detection list
+    struct Det {
+      cv::Point2f p1;
+      cv::Point2f p2;
+      double angle_rad;
+    };
+    std::vector<Det> dets;
+    dets.reserve(detections.size());
+    for (const auto &v : detections) {
+      Det d{cv::Point2f(static_cast<float>(v[0]), static_cast<float>(v[1])),
+            cv::Point2f(static_cast<float>(v[2]), static_cast<float>(v[3])),
+            0.0};
+      d.angle_rad = line_angle_rad(d.p1, d.p2);
+      dets.push_back(d);
+    }
+
+    // Build candidate matches within thresholds
+    struct Cand {
+      int t_idx;
+      int d_idx;
+      double dist_cost;
+      bool swap_det;
+    };
+    const int n_tracks = static_cast<int>(tracks_.size());
+    std::vector<Cand> cands;
+    cands.reserve(static_cast<size_t>(n_tracks) * dets.size());
+    for (int ti = 0; ti < n_tracks; ++ti) {
+      const auto &t = tracks_[ti];
+      for (int di = 0; di < static_cast<int>(dets.size()); ++di) {
+        const auto &d = dets[di];
+        double ang_diff = angle_diff_deg(t.angle_rad, d.angle_rad);
+        if (ang_diff > match_max_angle_deg_) continue;
+        bool swap_det = false;
+        double cost = endpoints_min_cost(t.p1, t.p2, d.p1, d.p2, swap_det);
+        if (cost <= static_cast<double>(match_max_px_)) {
+          cands.push_back(Cand{ti, di, cost, swap_det});
+        }
+      }
+    }
+    std::sort(cands.begin(), cands.end(), [](const Cand &a, const Cand &b) {
+      return a.dist_cost < b.dist_cost;
+    });
+
+    std::vector<int> det_assigned(dets.size(), -1);
+    std::vector<int> trk_assigned(n_tracks, -1);
+
+    // Greedy assignment
+    for (const auto &c : cands) {
+      if (c.t_idx < 0 || c.t_idx >= n_tracks) continue;
+      if (c.d_idx < 0 || c.d_idx >= static_cast<int>(dets.size())) continue;
+      if (trk_assigned[c.t_idx] != -1) continue;
+      if (det_assigned[c.d_idx] != -1) continue;
+      trk_assigned[c.t_idx] = c.d_idx;
+      det_assigned[c.d_idx] = c.t_idx;
+      // Apply EMA update
+      auto &t = tracks_[c.t_idx];
+      cv::Point2f dp1 = dets[c.d_idx].p1;
+      cv::Point2f dp2 = dets[c.d_idx].p2;
+      if (c.swap_det) std::swap(dp1, dp2);
+      t.p1 = dp1 * static_cast<float>(ema_alpha_) +
+             t.p1 * static_cast<float>(1.0 - ema_alpha_);
+      t.p2 = dp2 * static_cast<float>(ema_alpha_) +
+             t.p2 * static_cast<float>(1.0 - ema_alpha_);
+      t.angle_rad = line_angle_rad(t.p1, t.p2);
+      t.age += 1;
+      t.missed = 0;
+    }
+
+    // New tracks for unmatched detections
+    for (int di = 0; di < static_cast<int>(dets.size()); ++di) {
+      if (det_assigned[di] != -1) continue;
+      Track t;
+      t.id = next_track_id_++;
+      t.p1 = dets[di].p1;
+      t.p2 = dets[di].p2;
+      t.angle_rad = dets[di].angle_rad;
+      t.age = 1;
+      t.missed = 0;
+      tracks_.push_back(t);
+    }
+
+    // Age unmatched tracks
+    for (int ti = 0; ti < n_tracks; ++ti) {
+      if (trk_assigned[ti] == -1) {
+        tracks_[ti].missed += 1;
+      }
+    }
+    // Remove stale tracks
+    tracks_.erase(
+        std::remove_if(tracks_.begin(), tracks_.end(),
+                       [&](const Track &t) { return t.missed > max_missed_; }),
+        tracks_.end());
+
+    // Build output from mature tracks
+    std::vector<cv::Vec4i> out;
+    out.reserve(tracks_.size());
+    for (const auto &t : tracks_) {
+      if (t.age >= min_age_to_publish_) {
+        out.emplace_back(cv::Vec4i{static_cast<int>(std::lround(t.p1.x)),
+                                   static_cast<int>(std::lround(t.p1.y)),
+                                   static_cast<int>(std::lround(t.p2.x)),
+                                   static_cast<int>(std::lround(t.p2.y))});
+      }
+    }
+    return out;
   }
 
   // Parameters
@@ -541,6 +729,16 @@ class LineDetectorNode : public rclcpp::Node {
   bool use_edge_close_{};
   int edge_close_kernel_{};
   int edge_close_iter_{};
+
+  // Temporal smoothing
+  bool enable_temporal_smoothing_{};
+  double ema_alpha_{};
+  int match_max_px_{};
+  double match_max_angle_deg_{};
+  int min_age_to_publish_{};
+  int max_missed_{};
+  std::vector<Track> tracks_;
+  int next_track_id_{};
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
