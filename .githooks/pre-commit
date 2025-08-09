@@ -6,7 +6,7 @@ root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
 changed=$(git diff --cached --name-only --diff-filter=ACM | \
-  grep -E '\\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)
+  grep -E '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)
 
 if [ -z "$changed" ]; then
   exit 0
@@ -17,7 +17,6 @@ if ! command -v clang-format >/dev/null 2>&1; then
   exit 0
 fi
 
-echo "[pre-commit] Running clang-format on staged C/C++ files..."
 for f in $changed; do
   if [ -f "$f" ]; then
     clang-format -i "$f"
