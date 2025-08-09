@@ -26,6 +26,8 @@ class LineDetectorNode : public rclcpp::Node {
     // Declare parameters with defaults
     image_topic_ = this->declare_parameter<std::string>("image_topic", "image");
     use_color_output_ = this->declare_parameter<bool>("use_color_output", true);
+    publish_image_ =
+        this->declare_parameter<bool>("publish_image_with_lines", false);
 
     grayscale_ = this->declare_parameter<bool>("grayscale", true);
     use_hsv_mask_ = this->declare_parameter<bool>("use_hsv_mask", true);
@@ -89,8 +91,10 @@ class LineDetectorNode : public rclcpp::Node {
     // (subscriber expects reliable reliability).
     auto pub_qos = rclcpp::SensorDataQoS();
     pub_qos.reliable();
-    image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
-        "image_with_lines", pub_qos);
+    if (publish_image_) {
+      image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+          "image_with_lines", pub_qos);
+    }
     lines_pub_ =
         this->create_publisher<std_msgs::msg::Float32MultiArray>("lines", 10);
     if (publish_markers_) {
@@ -216,6 +220,12 @@ class LineDetectorNode : public rclcpp::Node {
           draw_thickness_ = p.as_int();
         else if (name == "publish_markers")
           publish_markers_ = p.as_bool();
+        else if (name == "publish_image_with_lines") {
+          // Requires (re)creating publisher. Not supported at runtime.
+          result.successful = false;
+          result.reason =
+              "Changing publish_image_with_lines at runtime is not supported";
+        }
         // HSV mask params
         else if (name == "hsv_lower_h")
           hsv_lower_h_ = p.as_int();
@@ -486,37 +496,39 @@ class LineDetectorNode : public rclcpp::Node {
       segments_out = segments_full;
     }
 
-    // Visualization image
-    cv::Mat vis;
-    if (use_color_output_) {
-      if (img.channels() == 1) {
-        cv::cvtColor(img, vis, cv::COLOR_GRAY2BGR);
-      } else {
-        vis = img.clone();
-      }
-    } else {
-      if (img.channels() == 3) {
-        cv::cvtColor(img, vis, cv::COLOR_BGR2GRAY);
-      } else {
-        vis = img.clone();
-      }
-    }
-    for (const auto &l : segments_out) {
-      cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
-               cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
-                          static_cast<int>(draw_color_bgr_[1]),
-                          static_cast<int>(draw_color_bgr_[2])),
-               draw_thickness_);
-    }
-
-    // Publish image
+    // Publish image (optional and disabled when publisher is not created)
     std_msgs::msg::Header header = msg->header;
-    cv_bridge::CvImage out_img;
-    out_img.header = header;
-    out_img.encoding = use_color_output_ ? sensor_msgs::image_encodings::BGR8
-                                         : sensor_msgs::image_encodings::MONO8;
-    out_img.image = vis;
-    image_pub_->publish(*out_img.toImageMsg());
+    if (image_pub_) {
+      cv::Mat vis;
+      if (use_color_output_) {
+        if (img.channels() == 1) {
+          cv::cvtColor(img, vis, cv::COLOR_GRAY2BGR);
+        } else {
+          vis = img.clone();
+        }
+      } else {
+        if (img.channels() == 3) {
+          cv::cvtColor(img, vis, cv::COLOR_BGR2GRAY);
+        } else {
+          vis = img.clone();
+        }
+      }
+      for (const auto &l : segments_out) {
+        cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
+                 cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
+                            static_cast<int>(draw_color_bgr_[1]),
+                            static_cast<int>(draw_color_bgr_[2])),
+                 draw_thickness_);
+      }
+
+      cv_bridge::CvImage out_img;
+      out_img.header = header;
+      out_img.encoding = use_color_output_
+                             ? sensor_msgs::image_encodings::BGR8
+                             : sensor_msgs::image_encodings::MONO8;
+      out_img.image = vis;
+      image_pub_->publish(*out_img.toImageMsg());
+    }
 
     // Publish lines
     std_msgs::msg::Float32MultiArray lines_msg;
@@ -693,6 +705,7 @@ class LineDetectorNode : public rclcpp::Node {
   // Parameters
   std::string image_topic_;
   bool use_color_output_{};
+  bool publish_image_{};
   bool grayscale_{};
   bool use_hsv_mask_{};
   int blur_ksize_{};

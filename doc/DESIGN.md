@@ -42,6 +42,9 @@
 - Visualization
   - `draw_color_bgr` (int[3]; default: `[0, 255, 0]`), `draw_thickness` (int; default: `2`)
   - `publish_markers` (bool; default: `true`)
+  - `publish_image_with_lines` (bool; default: `false`): publish the overlay image.
+    When `false`, the node does not create the image publisher and skips all
+    visualization rendering to reduce CPU load.
 
 ## HSV Mask (optional)
 - `use_hsv_mask` (bool; default: `true`): enable HSV masking after Canny to isolate the black center line.
