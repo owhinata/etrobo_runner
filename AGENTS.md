@@ -23,6 +23,15 @@ For simulation:
   - **Change Summary**
   - **Testing**
 
+## Commit Messages
+- Language: English.  
+- Style: Prefer Conventional Commits (e.g., `feat:`, `fix:`, `docs:`).  
+- Title line: one-line summary, 80 characters or fewer.  
+- Body: optional; wrap lines at 80 characters; explain what and why.  
+- Tone: imperative mood (e.g., "add", "fix", "update").  
+- Scope: optional short scope in parentheses (e.g., `feat(ui): ...`).  
+- Formatting: no trailing period in title; separate title/body with a blank line.  
+
 ## Documentation
 - Write all documentation, code comments, and branch names in **English**.  
 - If the design policy changes, **update `doc/DESIGN.md` as well**.
