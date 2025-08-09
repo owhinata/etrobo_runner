@@ -14,6 +14,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+find_package(geometry_msgs REQUIRED)
 
 add_executable(etrobo_line_detector src/etrobo_line_detector.cpp)
 target_include_directories(etrobo_line_detector PUBLIC
@@ -21,7 +22,7 @@ target_include_directories(etrobo_line_detector PUBLIC
   $<INSTALL_INTERFACE:include>)
 target_compile_features(etrobo_line_detector PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 ament_target_dependencies(etrobo_line_detector
-  rclcpp sensor_msgs std_msgs visualization_msgs image_transport cv_bridge
+  rclcpp sensor_msgs std_msgs visualization_msgs geometry_msgs image_transport cv_bridge
 )
 target_link_libraries(etrobo_line_detector
   ${OpenCV_LIBS}

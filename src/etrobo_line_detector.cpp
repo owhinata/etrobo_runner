@@ -30,8 +30,8 @@ class LineDetectorNode : public rclcpp::Node {
     grayscale_ = this->declare_parameter<bool>("grayscale", true);
     blur_ksize_ = this->declare_parameter<int>("blur_ksize", 5);
     blur_sigma_ = this->declare_parameter<double>("blur_sigma", 1.5);
-    roi_ = this->declare_parameter<std::vector<int>>(
-        "roi", std::vector<int>{-1, -1, -1, -1});
+    roi_ = this->declare_parameter<std::vector<int64_t>>(
+        "roi", std::vector<int64_t>{-1, -1, -1, -1});
     downscale_ = this->declare_parameter<double>("downscale", 1.0);
 
     canny_low_ = this->declare_parameter<int>("canny_low", 50);
@@ -50,8 +50,8 @@ class LineDetectorNode : public rclcpp::Node {
     min_theta_deg_ = this->declare_parameter<double>("min_theta_deg", 0.0);
     max_theta_deg_ = this->declare_parameter<double>("max_theta_deg", 180.0);
 
-    draw_color_bgr_ = this->declare_parameter<std::vector<int>>(
-        "draw_color_bgr", std::vector<int>{0, 255, 0});
+    draw_color_bgr_ = this->declare_parameter<std::vector<int64_t>>(
+        "draw_color_bgr", std::vector<int64_t>{0, 255, 0});
     draw_thickness_ = this->declare_parameter<int>("draw_thickness", 2);
     publish_markers_ = this->declare_parameter<bool>("publish_markers", true);
 
@@ -172,9 +172,13 @@ class LineDetectorNode : public rclcpp::Node {
     return result;
   }
 
-  static cv::Rect valid_roi(const cv::Mat &img, const std::vector<int> &roi) {
+  static cv::Rect valid_roi(const cv::Mat &img,
+                            const std::vector<int64_t> &roi) {
     if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
-    int x = roi[0], y = roi[1], w = roi[2], h = roi[3];
+    int x = static_cast<int>(roi[0]);
+    int y = static_cast<int>(roi[1]);
+    int w = static_cast<int>(roi[2]);
+    int h = static_cast<int>(roi[3]);
     if (x < 0 || y < 0 || w <= 0 || h <= 0) {
       return cv::Rect(0, 0, img.cols, img.rows);
     }
@@ -228,9 +232,9 @@ class LineDetectorNode : public rclcpp::Node {
     m.action = visualization_msgs::msg::Marker::ADD;
     m.scale.x = std::max(0.001, static_cast<double>(draw_thickness_));
     m.color.a = 1.0;
-    m.color.b = draw_color_bgr_[0] / 255.0;
-    m.color.g = draw_color_bgr_[1] / 255.0;
-    m.color.r = draw_color_bgr_[2] / 255.0;
+    m.color.b = static_cast<double>(draw_color_bgr_[0]) / 255.0;
+    m.color.g = static_cast<double>(draw_color_bgr_[1]) / 255.0;
+    m.color.r = static_cast<double>(draw_color_bgr_[2]) / 255.0;
     m.id = 0;
     m.pose.orientation.w = 1.0;
 
@@ -338,9 +342,6 @@ class LineDetectorNode : public rclcpp::Node {
     // Restore coordinates to original scale and ROI
     std::vector<cv::Vec4i> segments_full;
     segments_full.reserve(segments.size());
-    const double s = (downscale_ != 1.0)
-                         ? (1.0 / std::max(1e-6, 1.0 / downscale_))
-                         : 1.0;  // == scale
     for (const auto &l : segments) {
       int x1 = static_cast<int>(std::round(l[0] * scale)) + roi_rect.x;
       int y1 = static_cast<int>(std::round(l[1] * scale)) + roi_rect.y;
@@ -366,8 +367,9 @@ class LineDetectorNode : public rclcpp::Node {
     }
     for (const auto &l : segments_full) {
       cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
-               cv::Scalar(draw_color_bgr_[0], draw_color_bgr_[1],
-                          draw_color_bgr_[2]),
+               cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
+                          static_cast<int>(draw_color_bgr_[1]),
+                          static_cast<int>(draw_color_bgr_[2])),
                draw_thickness_);
     }
 
@@ -413,7 +415,7 @@ class LineDetectorNode : public rclcpp::Node {
   bool grayscale_{};
   int blur_ksize_{};
   double blur_sigma_{};
-  std::vector<int> roi_{};  // x,y,w,h (-1 = disabled)
+  std::vector<int64_t> roi_{};  // x,y,w,h (-1 = disabled)
   double downscale_{};
   int canny_low_{};
   int canny_high_{};
@@ -427,7 +429,7 @@ class LineDetectorNode : public rclcpp::Node {
   double max_line_gap_{};
   double min_theta_deg_{};
   double max_theta_deg_{};
-  std::vector<int> draw_color_bgr_{};
+  std::vector<int64_t> draw_color_bgr_{};
   int draw_thickness_{};
   bool publish_markers_{};
 
