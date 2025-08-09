@@ -23,7 +23,19 @@ using std::placeholders::_1;
 class LineDetectorNode : public rclcpp::Node {
  public:
   LineDetectorNode() : rclcpp::Node("etrobo_line_detector") {
-    // Declare parameters with defaults
+    declare_parameters();
+    sanitize_parameters();
+    setup_publishers();
+    setup_subscription();
+    setup_parameter_callback();
+
+    RCLCPP_INFO(this->get_logger(),
+                "Line detector node initialized. Subscribing to: %s",
+                image_topic_.c_str());
+  }
+
+ private:
+  void declare_parameters() {
     image_topic_ = this->declare_parameter<std::string>("image_topic", "image");
     use_color_output_ = this->declare_parameter<bool>("use_color_output", true);
     publish_image_ =
@@ -82,11 +94,9 @@ class LineDetectorNode : public rclcpp::Node {
         this->declare_parameter<double>("match_max_angle_deg", 10.0);
     min_age_to_publish_ = this->declare_parameter<int>("min_age_to_publish", 2);
     max_missed_ = this->declare_parameter<int>("max_missed", 3);
+  }
 
-    // Validate parameters minimally
-    sanitize_parameters();
-
-    // Publishers
+  void setup_publishers() {
     // Use SensorData QoS but set RELIABLE to interoperate with image_view
     // (subscriber expects reliable reliability).
     auto pub_qos = rclcpp::SensorDataQoS();
@@ -102,23 +112,239 @@ class LineDetectorNode : public rclcpp::Node {
           this->create_publisher<visualization_msgs::msg::MarkerArray>(
               "markers", 10);
     }
+  }
 
+  void setup_subscription() {
     // Subscription with SensorDataQoS depth=1, best effort
     auto qos = rclcpp::SensorDataQoS();
     image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
         image_topic_, qos,
         std::bind(&LineDetectorNode::image_callback, this, _1));
+  }
 
+  void setup_parameter_callback() {
     // Dynamic parameter updates for processing params (not topic/QoS)
     param_cb_handle_ = this->add_on_set_parameters_callback(std::bind(
         &LineDetectorNode::on_parameters_set, this, std::placeholders::_1));
-
-    RCLCPP_INFO(this->get_logger(),
-                "Line detector node initialized. Subscribing to: %s",
-                image_topic_.c_str());
   }
 
- private:
+  cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
+                          cv::Mat& original_img, cv::Rect& roi_rect, double& scale) {
+    // Convert to cv::Mat
+    cv_bridge::CvImageConstPtr cv_ptr;
+    try {
+      if (msg->encoding == sensor_msgs::image_encodings::BGR8 ||
+          msg->encoding == sensor_msgs::image_encodings::RGB8 ||
+          msg->encoding == sensor_msgs::image_encodings::MONO8) {
+        cv_ptr = cv_bridge::toCvShare(msg, msg->encoding);
+      } else {
+        cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+      }
+    } catch (const cv_bridge::Exception &e) {
+      RCLCPP_WARN(this->get_logger(), "cv_bridge exception: %s", e.what());
+      return cv::Mat();
+    }
+
+    cv::Mat img;
+    if (cv_ptr->encoding == sensor_msgs::image_encodings::RGB8) {
+      cv::cvtColor(cv_ptr->image, img, cv::COLOR_RGB2BGR);
+    } else if (cv_ptr->encoding == sensor_msgs::image_encodings::BGR8) {
+      img = cv_ptr->image;
+    } else if (cv_ptr->encoding == sensor_msgs::image_encodings::MONO8) {
+      img = cv_ptr->image;
+    } else {
+      // already converted to BGR8 above
+      img = cv_ptr->image;
+    }
+
+    original_img = img;
+
+    // ROI
+    roi_rect = valid_roi(img, roi_);
+    cv::Mat work = img(roi_rect).clone();
+
+    // Downscale
+    scale = 1.0;
+    if (downscale_ != 1.0) {
+      scale = std::max(1e-6, downscale_);
+      cv::Mat tmp;
+      cv::resize(work, tmp, cv::Size(), 1.0 / scale, 1.0 / scale,
+                 cv::INTER_AREA);
+      work = tmp;
+    }
+
+    // Grayscale and blur
+    cv::Mat gray;
+    if (grayscale_) {
+      if (work.channels() == 3) {
+        cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
+      } else {
+        gray = work;
+      }
+    } else {
+      // operate on one channel anyway for Canny
+      if (work.channels() == 3) {
+        cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
+      } else {
+        gray = work;
+      }
+    }
+    if (blur_ksize_ > 1) {
+      cv::GaussianBlur(gray, gray, cv::Size(blur_ksize_, blur_ksize_),
+                       blur_sigma_);
+    }
+
+    return gray;
+  }
+
+  cv::Mat detect_edges(const cv::Mat& gray, const cv::Mat& work) {
+    // Canny
+    cv::Mat edges;
+    cv::Canny(gray, edges, canny_low_, canny_high_, canny_aperture_,
+              canny_L2gradient_);
+    // Optional HSV mask AFTER Canny to avoid weakening edges before gradient
+    if (use_hsv_mask_) {
+      cv::Mat hsv_src;
+      if (work.channels() == 1) {
+        cv::cvtColor(work, hsv_src, cv::COLOR_GRAY2BGR);
+        cv::cvtColor(hsv_src, hsv_src, cv::COLOR_BGR2HSV);
+      } else {
+        cv::cvtColor(work, hsv_src, cv::COLOR_BGR2HSV);
+      }
+      const cv::Scalar lower(0, 0, 0);
+      const cv::Scalar upper(180, 120, 150);  // wider S/V to keep near-black
+      cv::Mat mask;
+      cv::inRange(hsv_src, lower, upper, mask);
+      // Thicken mask slightly so boundary edges survive masking
+      cv::Mat kernel =
+          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+      cv::dilate(mask, mask, kernel, cv::Point(-1, -1), 1);
+      cv::bitwise_and(edges, mask, edges);
+    }
+    // Optional edge closing to connect broken edges before Hough
+    if (use_edge_close_ && edge_close_iter_ > 0) {
+      cv::Mat kernel = cv::getStructuringElement(
+          cv::MORPH_RECT, cv::Size(edge_close_kernel_, edge_close_kernel_));
+      for (int i = 0; i < edge_close_iter_; ++i) {
+        cv::morphologyEx(edges, edges, cv::MORPH_CLOSE, kernel);
+      }
+    }
+
+    return edges;
+  }
+
+  std::vector<cv::Vec4i> detect_lines(const cv::Mat& edges) {
+    std::vector<cv::Vec4i> segments;
+    if (hough_type_ == "standard") {
+      std::vector<cv::Vec2f> lines;
+      double theta = theta_deg_ * CV_PI / 180.0;
+      cv::HoughLines(edges, lines, rho_, theta, threshold_);
+      double min_tr = min_theta_deg_ * CV_PI / 180.0;
+      double max_tr = max_theta_deg_ * CV_PI / 180.0;
+      segments = hough_standard_to_segments(lines, edges.cols, edges.rows,
+                                            min_tr, max_tr);
+    } else {
+      // probabilistic default
+      cv::HoughLinesP(edges, segments, rho_, theta_deg_ * CV_PI / 180.0,
+                      threshold_, min_line_length_, max_line_gap_);
+    }
+    return segments;
+  }
+
+  std::vector<cv::Vec4i> restore_coordinates(
+      const std::vector<cv::Vec4i>& segments,
+      const cv::Rect& roi_rect, double scale) {
+    std::vector<cv::Vec4i> segments_full;
+    segments_full.reserve(segments.size());
+    for (const auto &l : segments) {
+      int x1 = static_cast<int>(std::round(l[0] * scale)) + roi_rect.x;
+      int y1 = static_cast<int>(std::round(l[1] * scale)) + roi_rect.y;
+      int x2 = static_cast<int>(std::round(l[2] * scale)) + roi_rect.x;
+      int y2 = static_cast<int>(std::round(l[3] * scale)) + roi_rect.y;
+      segments_full.emplace_back(cv::Vec4i{x1, y1, x2, y2});
+    }
+    return segments_full;
+  }
+
+  void publish_visualization(const std::vector<cv::Vec4i>& segments,
+                           const cv::Mat& original_img,
+                           const std_msgs::msg::Header& header) {
+    if (!image_pub_) return;
+
+    cv::Mat vis;
+    if (use_color_output_) {
+      if (original_img.channels() == 1) {
+        cv::cvtColor(original_img, vis, cv::COLOR_GRAY2BGR);
+      } else {
+        vis = original_img.clone();
+      }
+    } else {
+      if (original_img.channels() == 3) {
+        cv::cvtColor(original_img, vis, cv::COLOR_BGR2GRAY);
+      } else {
+        vis = original_img.clone();
+      }
+    }
+
+    for (const auto &l : segments) {
+      cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
+               cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
+                          static_cast<int>(draw_color_bgr_[1]),
+                          static_cast<int>(draw_color_bgr_[2])),
+               draw_thickness_);
+    }
+
+    cv_bridge::CvImage out_img;
+    out_img.header = header;
+    out_img.encoding = use_color_output_
+                           ? sensor_msgs::image_encodings::BGR8
+                           : sensor_msgs::image_encodings::MONO8;
+    out_img.image = vis;
+    image_pub_->publish(*out_img.toImageMsg());
+  }
+
+  void publish_lines_data(const std::vector<cv::Vec4i>& segments) {
+    std_msgs::msg::Float32MultiArray lines_msg;
+    lines_msg.layout.dim.resize(1);
+    lines_msg.layout.dim[0].label = "lines_flat_xyxy";
+    lines_msg.layout.dim[0].size = segments.size() * 4;
+    lines_msg.layout.dim[0].stride = 1;
+    lines_msg.data.reserve(segments.size() * 4);
+    for (const auto &l : segments) {
+      lines_msg.data.push_back(static_cast<float>(l[0]));
+      lines_msg.data.push_back(static_cast<float>(l[1]));
+      lines_msg.data.push_back(static_cast<float>(l[2]));
+      lines_msg.data.push_back(static_cast<float>(l[3]));
+    }
+    lines_pub_->publish(lines_msg);
+  }
+
+  cv::Mat prepare_work_image(const cv::Mat& img, const cv::Rect& roi_rect, double scale) {
+    cv::Mat work = img(roi_rect).clone();
+    if (downscale_ != 1.0) {
+      cv::Mat tmp;
+      cv::resize(work, tmp, cv::Size(), 1.0 / scale, 1.0 / scale,
+                 cv::INTER_AREA);
+      work = tmp;
+    }
+    return work;
+  }
+
+  std::vector<cv::Vec4i> apply_temporal_smoothing(
+      const std::vector<cv::Vec4i>& segments_full) {
+    std::vector<cv::Vec4i> segments_out;
+    if (enable_temporal_smoothing_) {
+      segments_out = update_tracks_and_build_output(segments_full);
+      if (segments_out.empty() && !segments_full.empty()) {
+        // Fallback to raw detections if no stable tracks yet
+        segments_out = segments_full;
+      }
+    } else {
+      segments_out = segments_full;
+    }
+    return segments_out;
+  }
+
   void sanitize_parameters() {
     if (blur_ksize_ <= 0) blur_ksize_ = 1;
     if (blur_ksize_ % 2 == 0) blur_ksize_ += 1;  // must be odd
@@ -363,191 +589,36 @@ class LineDetectorNode : public rclcpp::Node {
 
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
     const auto t0 = std::chrono::steady_clock::now();
-    // Convert to cv::Mat (try BGR8)
-    cv_bridge::CvImageConstPtr cv_ptr;
-    try {
-      if (msg->encoding == sensor_msgs::image_encodings::BGR8 ||
-          msg->encoding == sensor_msgs::image_encodings::RGB8 ||
-          msg->encoding == sensor_msgs::image_encodings::MONO8) {
-        cv_ptr = cv_bridge::toCvShare(msg, msg->encoding);
-      } else {
-        cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
-      }
-    } catch (const cv_bridge::Exception &e) {
-      RCLCPP_WARN(this->get_logger(), "cv_bridge exception: %s", e.what());
-      return;
-    }
-
+    
+    // Step 1: Preprocess image
     cv::Mat img;
-    if (cv_ptr->encoding == sensor_msgs::image_encodings::RGB8) {
-      cv::cvtColor(cv_ptr->image, img, cv::COLOR_RGB2BGR);
-    } else if (cv_ptr->encoding == sensor_msgs::image_encodings::BGR8) {
-      img = cv_ptr->image;
-    } else if (cv_ptr->encoding == sensor_msgs::image_encodings::MONO8) {
-      img = cv_ptr->image;
-    } else {
-      // already converted to BGR8 above
-      img = cv_ptr->image;
-    }
+    cv::Rect roi_rect;
+    double scale;
+    cv::Mat gray = preprocess_image(msg, img, roi_rect, scale);
+    if (gray.empty()) return;
+    
+    // Step 2: Prepare work image for edge detection
+    cv::Mat work = prepare_work_image(img, roi_rect, scale);
 
-    // ROI
-    cv::Rect roi_rect = valid_roi(img, roi_);
-    cv::Mat work = img(roi_rect).clone();
+    // Step 3: Detect edges
+    cv::Mat edges = detect_edges(gray, work);
 
-    // Downscale
-    double scale = 1.0;
-    if (downscale_ != 1.0) {
-      scale = std::max(1e-6, downscale_);
-      cv::Mat tmp;
-      cv::resize(work, tmp, cv::Size(), 1.0 / scale, 1.0 / scale,
-                 cv::INTER_AREA);
-      work = tmp;
-    }
+    // Step 4: Detect lines
+    std::vector<cv::Vec4i> segments = detect_lines(edges);
 
-    // Grayscale and blur
-    cv::Mat gray;
-    if (grayscale_) {
-      if (work.channels() == 3) {
-        cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
-      } else {
-        gray = work;
-      }
-    } else {
-      // operate on one channel anyway for Canny
-      if (work.channels() == 3) {
-        cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
-      } else {
-        gray = work;
-      }
-    }
-    if (blur_ksize_ > 1) {
-      cv::GaussianBlur(gray, gray, cv::Size(blur_ksize_, blur_ksize_),
-                       blur_sigma_);
-    }
+    // Step 5: Restore coordinates to original scale and ROI
+    std::vector<cv::Vec4i> segments_full = restore_coordinates(segments, roi_rect, scale);
 
-    // Canny
-    cv::Mat edges;
-    cv::Canny(gray, edges, canny_low_, canny_high_, canny_aperture_,
-              canny_L2gradient_);
-    // Optional HSV mask AFTER Canny to avoid weakening edges before gradient
-    if (use_hsv_mask_) {
-      cv::Mat hsv_src;
-      if (work.channels() == 1) {
-        cv::cvtColor(work, hsv_src, cv::COLOR_GRAY2BGR);
-        cv::cvtColor(hsv_src, hsv_src, cv::COLOR_BGR2HSV);
-      } else {
-        cv::cvtColor(work, hsv_src, cv::COLOR_BGR2HSV);
-      }
-      const cv::Scalar lower(0, 0, 0);
-      const cv::Scalar upper(180, 120, 150);  // wider S/V to keep near-black
-      cv::Mat mask;
-      cv::inRange(hsv_src, lower, upper, mask);
-      // Thicken mask slightly so boundary edges survive masking
-      cv::Mat kernel =
-          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-      cv::dilate(mask, mask, kernel, cv::Point(-1, -1), 1);
-      cv::bitwise_and(edges, mask, edges);
-    }
-    // Optional edge closing to connect broken edges before Hough
-    if (use_edge_close_ && edge_close_iter_ > 0) {
-      cv::Mat kernel = cv::getStructuringElement(
-          cv::MORPH_RECT, cv::Size(edge_close_kernel_, edge_close_kernel_));
-      for (int i = 0; i < edge_close_iter_; ++i) {
-        cv::morphologyEx(edges, edges, cv::MORPH_CLOSE, kernel);
-      }
-    }
+    // Step 6: Apply temporal smoothing
+    std::vector<cv::Vec4i> segments_out = apply_temporal_smoothing(segments_full);
 
-    // Hough
-    std::vector<cv::Vec4i> segments;
-    if (hough_type_ == "standard") {
-      std::vector<cv::Vec2f> lines;
-      double theta = theta_deg_ * CV_PI / 180.0;
-      cv::HoughLines(edges, lines, rho_, theta, threshold_);
-      double min_tr = min_theta_deg_ * CV_PI / 180.0;
-      double max_tr = max_theta_deg_ * CV_PI / 180.0;
-      segments = hough_standard_to_segments(lines, edges.cols, edges.rows,
-                                            min_tr, max_tr);
-    } else {
-      // probabilistic default
-      cv::HoughLinesP(edges, segments, rho_, theta_deg_ * CV_PI / 180.0,
-                      threshold_, min_line_length_, max_line_gap_);
-    }
-
-    // Restore coordinates to original scale and ROI
-    std::vector<cv::Vec4i> segments_full;
-    segments_full.reserve(segments.size());
-    for (const auto &l : segments) {
-      int x1 = static_cast<int>(std::round(l[0] * scale)) + roi_rect.x;
-      int y1 = static_cast<int>(std::round(l[1] * scale)) + roi_rect.y;
-      int x2 = static_cast<int>(std::round(l[2] * scale)) + roi_rect.x;
-      int y2 = static_cast<int>(std::round(l[3] * scale)) + roi_rect.y;
-      segments_full.emplace_back(cv::Vec4i{x1, y1, x2, y2});
-    }
-
-    // Temporal smoothing (optional)
-    std::vector<cv::Vec4i> segments_out;
-    if (enable_temporal_smoothing_) {
-      segments_out = update_tracks_and_build_output(segments_full);
-      if (segments_out.empty() && !segments_full.empty()) {
-        // Fallback to raw detections if no stable tracks yet
-        segments_out = segments_full;
-      }
-    } else {
-      segments_out = segments_full;
-    }
-
-    // Publish image (optional and disabled when publisher is not created)
+    // Step 7: Publish results
     std_msgs::msg::Header header = msg->header;
-    if (image_pub_) {
-      cv::Mat vis;
-      if (use_color_output_) {
-        if (img.channels() == 1) {
-          cv::cvtColor(img, vis, cv::COLOR_GRAY2BGR);
-        } else {
-          vis = img.clone();
-        }
-      } else {
-        if (img.channels() == 3) {
-          cv::cvtColor(img, vis, cv::COLOR_BGR2GRAY);
-        } else {
-          vis = img.clone();
-        }
-      }
-      for (const auto &l : segments_out) {
-        cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
-                 cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
-                            static_cast<int>(draw_color_bgr_[1]),
-                            static_cast<int>(draw_color_bgr_[2])),
-                 draw_thickness_);
-      }
-
-      cv_bridge::CvImage out_img;
-      out_img.header = header;
-      out_img.encoding = use_color_output_
-                             ? sensor_msgs::image_encodings::BGR8
-                             : sensor_msgs::image_encodings::MONO8;
-      out_img.image = vis;
-      image_pub_->publish(*out_img.toImageMsg());
-    }
-
-    // Publish lines
-    std_msgs::msg::Float32MultiArray lines_msg;
-    lines_msg.layout.dim.resize(1);
-    lines_msg.layout.dim[0].label = "lines_flat_xyxy";
-    lines_msg.layout.dim[0].size = segments_out.size() * 4;
-    lines_msg.layout.dim[0].stride = 1;
-    lines_msg.data.reserve(segments_out.size() * 4);
-    for (const auto &l : segments_out) {
-      lines_msg.data.push_back(static_cast<float>(l[0]));
-      lines_msg.data.push_back(static_cast<float>(l[1]));
-      lines_msg.data.push_back(static_cast<float>(l[2]));
-      lines_msg.data.push_back(static_cast<float>(l[3]));
-    }
-    lines_pub_->publish(lines_msg);
-
-    // Publish markers (optional)
+    publish_visualization(segments_out, img, header);
+    publish_lines_data(segments_out);
     publish_markers(segments_out, header);
 
+    // Step 8: Log timing
     const auto t1 = std::chrono::steady_clock::now();
     const double ms =
         std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
