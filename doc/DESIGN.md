@@ -52,11 +52,17 @@
   - `hsv_dilate_kernel` (int; default: `3`): odd kernel size.
   - `hsv_dilate_iter` (int; default: `1`): dilation iterations (0 to disable).
 
+## Edge Closing (optional)
+- `use_edge_close` (bool; default: `true`): apply morphological closing on edges to reduce fragmentation.
+- `edge_close_kernel` (int; default: `3`): odd kernel size for rectangular structuring element.
+- `edge_close_iter` (int; default: `1`): number of closing iterations (0 to disable).
+
 ## Processing Flow
 1. Convert the received image to `cv::Mat` via `cv_bridge`.
 2. Apply ROI cropping → downscale (`downscale`).
 3. Convert to grayscale if needed → apply GaussianBlur.
 4. Run Canny edge detection.
+   - If enabled, apply HSV mask to the Canny edges, then optional edge closing (morphological close) before Hough.
 5. Run Hough transform
    - `probabilistic`: use `cv::HoughLinesP` to obtain segments (x1, y1, x2, y2)
    - `standard`: use `cv::HoughLines` to obtain (rho, theta), then extend to image borders to form segments

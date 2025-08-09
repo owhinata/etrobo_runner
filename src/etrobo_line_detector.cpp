@@ -66,6 +66,11 @@ class LineDetectorNode : public rclcpp::Node {
     hsv_dilate_kernel_ = this->declare_parameter<int>("hsv_dilate_kernel", 3);
     hsv_dilate_iter_ = this->declare_parameter<int>("hsv_dilate_iter", 1);
 
+    // Edge closing parameters
+    use_edge_close_ = this->declare_parameter<bool>("use_edge_close", true);
+    edge_close_kernel_ = this->declare_parameter<int>("edge_close_kernel", 3);
+    edge_close_iter_ = this->declare_parameter<int>("edge_close_iter", 1);
+
     // Validate parameters minimally
     sanitize_parameters();
 
@@ -132,6 +137,10 @@ class LineDetectorNode : public rclcpp::Node {
     if (hsv_dilate_kernel_ < 1) hsv_dilate_kernel_ = 1;
     if ((hsv_dilate_kernel_ % 2) == 0) hsv_dilate_kernel_ += 1;  // make odd
     if (hsv_dilate_iter_ < 0) hsv_dilate_iter_ = 0;
+    // Edge closing morphology params
+    if (edge_close_kernel_ < 1) edge_close_kernel_ = 1;
+    if ((edge_close_kernel_ % 2) == 0) edge_close_kernel_ += 1;  // make odd
+    if (edge_close_iter_ < 0) edge_close_iter_ = 0;
   }
 
   rcl_interfaces::msg::SetParametersResult on_parameters_set(
@@ -206,6 +215,13 @@ class LineDetectorNode : public rclcpp::Node {
           hsv_dilate_kernel_ = p.as_int();
         else if (name == "hsv_dilate_iter")
           hsv_dilate_iter_ = p.as_int();
+        // Edge closing params
+        else if (name == "use_edge_close")
+          use_edge_close_ = p.as_bool();
+        else if (name == "edge_close_kernel")
+          edge_close_kernel_ = p.as_int();
+        else if (name == "edge_close_iter")
+          edge_close_iter_ = p.as_int();
         else if (name == "image_topic") {
           // Do not allow changing topic at runtime as it requires
           // resubscription
@@ -391,6 +407,14 @@ class LineDetectorNode : public rclcpp::Node {
       cv::dilate(mask, mask, kernel, cv::Point(-1, -1), 1);
       cv::bitwise_and(edges, mask, edges);
     }
+    // Optional edge closing to connect broken edges before Hough
+    if (use_edge_close_ && edge_close_iter_ > 0) {
+      cv::Mat kernel = cv::getStructuringElement(
+          cv::MORPH_RECT, cv::Size(edge_close_kernel_, edge_close_kernel_));
+      for (int i = 0; i < edge_close_iter_; ++i) {
+        cv::morphologyEx(edges, edges, cv::MORPH_CLOSE, kernel);
+      }
+    }
 
     // Hough
     std::vector<cv::Vec4i> segments;
@@ -512,6 +536,11 @@ class LineDetectorNode : public rclcpp::Node {
   int hsv_upper_v_{};
   int hsv_dilate_kernel_{};
   int hsv_dilate_iter_{};
+
+  // Edge closing parameters
+  bool use_edge_close_{};
+  int edge_close_kernel_{};
+  int edge_close_iter_{};
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
