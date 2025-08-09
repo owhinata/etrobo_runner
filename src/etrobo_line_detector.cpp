@@ -59,8 +59,12 @@ class LineDetectorNode : public rclcpp::Node {
     sanitize_parameters();
 
     // Publishers
+    // Use SensorData QoS but set RELIABLE to interoperate with image_view
+    // (subscriber expects reliable reliability).
+    auto pub_qos = rclcpp::SensorDataQoS();
+    pub_qos.reliable();
     image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
-        "image_with_lines", rclcpp::SensorDataQoS());
+        "image_with_lines", pub_qos);
     lines_pub_ =
         this->create_publisher<std_msgs::msg::Float32MultiArray>("lines", 10);
     if (publish_markers_) {
