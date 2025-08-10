@@ -20,7 +20,7 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image as ImageMsg
 from cv_bridge import CvBridge
-from rcl_interfaces.srv import SetParameters
+from rcl_interfaces.srv import SetParameters, GetParameters
 from rcl_interfaces.msg import Parameter, ParameterValue, ParameterType
 
 
@@ -51,6 +51,10 @@ class LineDetectorParameterGUI:
         self.update_thread = threading.Thread(
             target=self.update_image_display, daemon=True)
         self.update_thread.start()
+
+        # Fetch initial parameters from node (after GUI is setup)
+        # Delay to ensure ROS is ready
+        self.root.after(2000, self.fetch_initial_parameters)
 
     def setup_gui(self):
         """Setup the main GUI layout"""
@@ -201,6 +205,22 @@ class LineDetectorParameterGUI:
                 "min_age_to_publish": {"type": "int", "default": 2, "min": 0, "max": 10},
                 "max_missed": {"type": "int", "default": 3, "min": 0, "max": 10}
             },
+            "Calibration": {
+                "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
+                "landmark_distance_meters": {"type": "double", "default": 0.59, "min": 0.1, "max": 2.0},
+                "calib_timeout_sec": {"type": "double", "default": 60.0, "min": 0.0, "max": 300.0},
+                "calib_hsv_s_max": {"type": "int", "default": 60, "min": 0, "max": 255},
+                "calib_hsv_v_min": {"type": "int", "default": 80, "min": 0, "max": 255},
+                "calib_hsv_v_max": {"type": "int", "default": 168, "min": 0, "max": 255},
+                "calib_min_area": {"type": "int", "default": 80, "min": 10, "max": 1000},
+                "calib_min_major_px": {"type": "int", "default": 8, "min": 1, "max": 100},
+                "calib_max_major_ratio": {"type": "double", "default": 0.65, "min": 0.1, "max": 1.0},
+                "calib_fill_min": {"type": "double", "default": 0.25, "min": 0.0, "max": 1.0},
+                "calib_roi_x": {"type": "int", "default": -1, "min": -1, "max": 1920},
+                "calib_roi_y": {"type": "int", "default": -1, "min": -1, "max": 1080},
+                "calib_roi_w": {"type": "int", "default": -1, "min": -1, "max": 1920},
+                "calib_roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080}
+            },
             "Visualization": {
                 "draw_thickness": {"type": "int", "default": 2, "min": 1, "max": 10},
                 "publish_markers": {"type": "bool", "default": True}
@@ -281,6 +301,7 @@ class LineDetectorParameterGUI:
 
         # Store widget reference
         self.parameter_widgets[param_name] = var
+        # Initialize with default (will be overwritten by node parameters if available)
         self.parameters[param_name] = config["default"]
 
     def setup_ros(self):
@@ -418,6 +439,51 @@ class LineDetectorParameterGUI:
         else:
             self.update_status('connection', "Connection: Disconnected")
 
+    def fetch_initial_parameters(self):
+        """Fetch initial parameters from the node on startup"""
+        if not self.ros_node:
+            print("Warning: ROS node not ready for parameter fetching")
+            return
+
+        # Build list of all parameter names from definitions
+        param_names = []
+        for category, params in self.parameter_definitions.items():
+            for param_name in params.keys():
+                # Skip individual ROI components, get arrays instead
+                if not (param_name.endswith('_x') or param_name.endswith('_y') or
+                        param_name.endswith('_w') or param_name.endswith('_h')):
+                    param_names.append(param_name)
+
+        # Add ROI array parameters
+        param_names.extend(['roi', 'calib_roi'])
+
+        # Get parameters from node
+        fetched_params = self.ros_node.get_parameters_from_node(param_names)
+
+        if fetched_params:
+            print(f"Fetched {len(fetched_params)} parameters from node")
+            self.update_status(
+                'fetch', f"Loaded {len(fetched_params)} parameters from node")
+
+            # Update GUI widgets and internal parameters
+            for param_name, value in fetched_params.items():
+                if param_name in self.parameter_widgets:
+                    try:
+                        self.parameter_widgets[param_name].set(value)
+                        self.parameters[param_name] = value
+
+                        # Update value label for scale widgets
+                        if f"{param_name}_label" in self.parameter_widgets:
+                            self.parameter_widgets[f"{param_name}_label"].config(
+                                text=str(value))
+                    except tk.TclError as e:
+                        print(
+                            f"Warning: Failed to set parameter {param_name}={value}: {e}")
+        else:
+            print("Warning: No parameters fetched from node, using defaults")
+            self.update_status(
+                'fetch', "Using default parameters (node not accessible)")
+
     def parameter_changed(self, param_name: str, value: Any):
         """Handle parameter changes"""
         self.parameters[param_name] = value
@@ -479,9 +545,11 @@ class LineDetectorGUINode(Node):
             10
         )
 
-        # Parameter client
+        # Parameter clients
         self.param_client = self.create_client(
             SetParameters, 'etrobo_line_detector/set_parameters')
+        self.param_get_client = self.create_client(
+            GetParameters, 'etrobo_line_detector/get_parameters')
 
         self.get_logger().info("Line Detector GUI Node started")
 
@@ -501,9 +569,9 @@ class LineDetectorGUINode(Node):
             return
 
         # Convert ROI parameters
-        if param_name.startswith('roi_'):
+        if param_name.startswith('roi_') or param_name.startswith('calib_roi_'):
             # Handle ROI as array parameter
-            # This would need special handling to combine roi_x, roi_y, roi_w, roi_h
+            self._update_roi_parameter(param_name, value)
             return
 
         # Create parameter message
@@ -533,6 +601,93 @@ class LineDetectorGUINode(Node):
 
         future = self.param_client.call_async(request)
         # Note: In a production version, we'd handle the response
+
+    def _update_roi_parameter(self, param_name: str, value: Any):
+        """Update ROI array parameters by combining individual components"""
+        if param_name.startswith('calib_roi_'):
+            roi_param_name = 'calib_roi'
+            components = ['calib_roi_x', 'calib_roi_y',
+                          'calib_roi_w', 'calib_roi_h']
+        else:  # roi_
+            roi_param_name = 'roi'
+            components = ['roi_x', 'roi_y', 'roi_w', 'roi_h']
+
+        # Get all current values
+        roi_values = []
+        for comp in components:
+            if comp in self.parameters:
+                roi_values.append(int(self.parameters[comp]))
+            else:
+                roi_values.append(-1)  # default value
+
+        # Create array parameter
+        param = Parameter()
+        param.name = roi_param_name
+        param.value = ParameterValue(
+            type=ParameterType.PARAMETER_INTEGER_ARRAY,
+            integer_array_value=roi_values
+        )
+
+        # Send parameter
+        request = SetParameters.Request()
+        request.parameters = [param]
+        future = self.param_client.call_async(request)
+
+    def get_parameters_from_node(self, param_names: list) -> dict:
+        """Get parameters from the target node"""
+        if not self.param_get_client.service_is_ready():
+            self.get_logger().warn("Parameter get service not ready")
+            return {}
+
+        request = GetParameters.Request()
+        request.names = param_names
+
+        try:
+            future = self.param_get_client.call_async(request)
+            # Wait for response (blocking call)
+            rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+
+            if future.result() is not None:
+                response = future.result()
+                param_dict = {}
+
+                for i, param_name in enumerate(param_names):
+                    if i < len(response.values):
+                        param_value = response.values[i]
+
+                        # Convert parameter value based on type
+                        if param_value.type == ParameterType.PARAMETER_BOOL:
+                            param_dict[param_name] = param_value.bool_value
+                        elif param_value.type == ParameterType.PARAMETER_INTEGER:
+                            param_dict[param_name] = param_value.integer_value
+                        elif param_value.type == ParameterType.PARAMETER_DOUBLE:
+                            param_dict[param_name] = param_value.double_value
+                        elif param_value.type == ParameterType.PARAMETER_STRING:
+                            param_dict[param_name] = param_value.string_value
+                        elif param_value.type == ParameterType.PARAMETER_INTEGER_ARRAY:
+                            # Handle ROI arrays
+                            if param_name == 'roi' and len(param_value.integer_array_value) >= 4:
+                                param_dict['roi_x'] = param_value.integer_array_value[0]
+                                param_dict['roi_y'] = param_value.integer_array_value[1]
+                                param_dict['roi_w'] = param_value.integer_array_value[2]
+                                param_dict['roi_h'] = param_value.integer_array_value[3]
+                            elif param_name == 'calib_roi' and len(param_value.integer_array_value) >= 4:
+                                param_dict['calib_roi_x'] = param_value.integer_array_value[0]
+                                param_dict['calib_roi_y'] = param_value.integer_array_value[1]
+                                param_dict['calib_roi_w'] = param_value.integer_array_value[2]
+                                param_dict['calib_roi_h'] = param_value.integer_array_value[3]
+                            else:
+                                param_dict[param_name] = list(
+                                    param_value.integer_array_value)
+
+                return param_dict
+            else:
+                self.get_logger().warn("Failed to get parameters from node")
+                return {}
+
+        except Exception as e:
+            self.get_logger().error(f"Error getting parameters: {e}")
+            return {}
 
 
 def main():

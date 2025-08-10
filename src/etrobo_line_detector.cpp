@@ -109,8 +109,8 @@ class LineDetectorNode : public rclcpp::Node {
     calib_roi_ = this->declare_parameter<std::vector<int64_t>>(
         "calib_roi", std::vector<int64_t>{-1, -1, -1, -1});
     calib_hsv_s_max_ = this->declare_parameter<int>("calib_hsv_s_max", 60);
-    calib_hsv_v_min_ = this->declare_parameter<int>("calib_hsv_v_min", 60);
-    calib_hsv_v_max_ = this->declare_parameter<int>("calib_hsv_v_max", 200);
+    calib_hsv_v_min_ = this->declare_parameter<int>("calib_hsv_v_min", 80);
+    calib_hsv_v_max_ = this->declare_parameter<int>("calib_hsv_v_max", 168);
     calib_min_area_ = this->declare_parameter<int>("calib_min_area", 80);
     calib_min_major_px_ = this->declare_parameter<int>("calib_min_major_px", 8);
     calib_max_major_ratio_ =

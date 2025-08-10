@@ -63,12 +63,31 @@ cd /path/to/etrobo_line_detector
 python3 scripts/line_detector_gui.py
 ```
 
+### Calibration Tuning
+For gray disk detection issues during calibration, use the GUI's **Calibration** section:
+
+```bash
+# Start node with continuous calibration (no timeout)
+ros2 run etrobo_line_detector etrobo_line_detector \
+  --ros-args \
+  -p publish_image_with_lines:=true \
+  -p calib_timeout_sec:=0.0
+
+# Launch GUI and adjust:
+# - calib_hsv_v_min/max: For gray brightness range
+# - calib_hsv_s_max: For color saturation threshold  
+# - calib_min_area: For minimum disk size
+# - calib_roi_*: To focus detection on specific region
+python3 scripts/line_detector_gui.py
+```
+
 The GUI provides:
 - **Live Image Display**: Real-time visualization of detection results
-- **Organized Parameters**: 8 categories of parameters with intuitive controls
+- **Organized Parameters**: 9 categories of parameters with intuitive controls
 - **Interactive Widgets**: Sliders, checkboxes, dropdowns for different parameter types
 - **Real-time Updates**: Changes apply immediately to the running node
 - **Anti-flicker**: Smooth 30fps display with optimized rendering
+- **Calibration Support**: Interactive tuning of gray disk detection parameters during calibration
 
 ## Topics
 - **Input**: `~image` (`sensor_msgs/msg/Image`) — source camera image
@@ -100,7 +119,7 @@ See [doc/DESIGN.md](doc/DESIGN.md) for complete parameter documentation.
   - If calibration times out (`calib_timeout_sec`), the node proceeds with a 0 rad pitch.
 
 ## GUI Parameter Categories
-The Python GUI organizes parameters into 8 intuitive sections:
+The Python GUI organizes parameters into 9 intuitive sections:
 1. **I/O Settings** — Input/output configuration
 2. **Pre-processing** — Image preparation (ROI, blur, scaling)
 3. **Canny Edge** — Edge detection parameters
@@ -108,7 +127,8 @@ The Python GUI organizes parameters into 8 intuitive sections:
 5. **HSV Mask** — Color-based filtering for black lines
 6. **Edge Closing** — Morphological edge enhancement
 7. **Temporal Smoothing** — Multi-frame line tracking
-8. **Visualization** — Drawing and output options
+8. **Calibration** — Camera pitch estimation and gray disk detection settings
+9. **Visualization** — Drawing and output options
 
 ## License
 This project follows the repository’s license policy.
