@@ -17,6 +17,19 @@
   - `calib_timeout_sec` (double; default: `60.0`; `0` disables timeout and keeps calibration running)
   - Uses an internal buffer of landmark detections (median of ~10 samples) to robustly estimate pitch.
 
+## Calibration Parameters (Gray Circle Detection)
+- `calib_roi` (int[4]; default: `[200, 150, 240, 180]`): ROI for gray circle detection `[x, y, w, h]`
+- HSV thresholds for gray circle detection:
+  - `calib_hsv_s_max` (int; default: `16`): maximum saturation (very low for gray objects)
+  - `calib_hsv_v_min` (int; default: `100`): minimum brightness value
+  - `calib_hsv_v_max` (int; default: `168`): maximum brightness value
+- Circle detection constraints:
+  - `calib_min_area` (int; default: `80`): minimum contour area in pixels
+  - `calib_min_major_px` (int; default: `8`): minimum ellipse major axis length
+  - `calib_max_major_ratio` (double; default: `0.65`): maximum major axis as fraction of image size
+  - `calib_fill_min` (double; default: `0.25`): minimum fill ratio (mask pixels / ellipse area)
+- Debug visualization: HSV mask displayed in top-right corner during calibration
+
 ## Topics
 - Input
   - `~image` (`sensor_msgs/msg/Image`): subscribe via `image_transport` (raw recommended)
@@ -57,6 +70,7 @@
   - `publish_image_with_lines` (bool; default: `false`): publish the overlay image.
     When `false`, the node does not create the image publisher and skips all
     visualization rendering to reduce CPU load.
+  - During calibration: displays HSV mask (160x120px) in top-right corner with semi-transparent background
 
 ## HSV Mask (optional)
 - `use_hsv_mask` (bool; default: `true`): enable HSV masking after Canny to isolate the black center line.

@@ -209,17 +209,17 @@ class LineDetectorParameterGUI:
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
                 "landmark_distance_meters": {"type": "double", "default": 0.59, "min": 0.1, "max": 2.0},
                 "calib_timeout_sec": {"type": "double", "default": 60.0, "min": 0.0, "max": 300.0},
-                "calib_hsv_s_max": {"type": "int", "default": 60, "min": 0, "max": 255},
-                "calib_hsv_v_min": {"type": "int", "default": 80, "min": 0, "max": 255},
+                "calib_hsv_s_max": {"type": "int", "default": 16, "min": 0, "max": 255},
+                "calib_hsv_v_min": {"type": "int", "default": 100, "min": 0, "max": 255},
                 "calib_hsv_v_max": {"type": "int", "default": 168, "min": 0, "max": 255},
                 "calib_min_area": {"type": "int", "default": 80, "min": 10, "max": 1000},
                 "calib_min_major_px": {"type": "int", "default": 8, "min": 1, "max": 100},
                 "calib_max_major_ratio": {"type": "double", "default": 0.65, "min": 0.1, "max": 1.0},
                 "calib_fill_min": {"type": "double", "default": 0.25, "min": 0.0, "max": 1.0},
-                "calib_roi_x": {"type": "int", "default": -1, "min": -1, "max": 1920},
-                "calib_roi_y": {"type": "int", "default": -1, "min": -1, "max": 1080},
-                "calib_roi_w": {"type": "int", "default": -1, "min": -1, "max": 1920},
-                "calib_roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080}
+                "calib_roi_x": {"type": "int", "default": 200, "min": -1, "max": 1920},
+                "calib_roi_y": {"type": "int", "default": 150, "min": -1, "max": 1080},
+                "calib_roi_w": {"type": "int", "default": 240, "min": -1, "max": 1920},
+                "calib_roi_h": {"type": "int", "default": 180, "min": -1, "max": 1080}
             },
             "Visualization": {
                 "draw_thickness": {"type": "int", "default": 2, "min": 1, "max": 10},

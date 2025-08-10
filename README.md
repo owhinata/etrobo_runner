@@ -74,10 +74,11 @@ ros2 run etrobo_line_detector etrobo_line_detector \
   -p calib_timeout_sec:=0.0
 
 # Launch GUI and adjust:
-# - calib_hsv_v_min/max: For gray brightness range
-# - calib_hsv_s_max: For color saturation threshold  
-# - calib_min_area: For minimum disk size
-# - calib_roi_*: To focus detection on specific region
+# - calib_hsv_s_max (default=16): Very low saturation for gray objects
+# - calib_hsv_v_min (default=100): Minimum brightness for detection
+# - calib_hsv_v_max (default=168): Maximum brightness threshold
+# - calib_roi_* (default=200,150,240,180): Focus detection region
+# - HSV mask visualization appears in top-right corner during calibration
 python3 scripts/line_detector_gui.py
 ```
 
@@ -87,7 +88,7 @@ The GUI provides:
 - **Interactive Widgets**: Sliders, checkboxes, dropdowns for different parameter types
 - **Real-time Updates**: Changes apply immediately to the running node
 - **Anti-flicker**: Smooth 30fps display with optimized rendering
-- **Calibration Support**: Interactive tuning of gray disk detection parameters during calibration
+- **Calibration Support**: Interactive tuning of gray disk detection parameters during calibration with HSV mask visualization
 
 ## Topics
 - **Input**: `~image` (`sensor_msgs/msg/Image`) — source camera image
@@ -99,7 +100,7 @@ The GUI provides:
 
 ## Parameters (excerpt)
 - **I/O**: `image_topic`, `use_color_output`, `publish_image_with_lines`
-- **Calibration**: `camera_info_topic` (string), `camera_height_meters` (double; default 0.2), `landmark_distance_meters` (double; default 0.59), `calib_timeout_sec` (double; default 60.0; set 0 to disable timeout and keep calibrating continuously)
+- **Calibration**: `camera_info_topic` (string), `camera_height_meters` (double; default 0.2), `landmark_distance_meters` (double; default 0.59), `calib_timeout_sec` (double; default 60.0; set 0 to disable timeout and keep calibrating continuously), `calib_roi` (int[4]; default [200,150,240,180]), HSV thresholds (`calib_hsv_s_max`=16, `calib_hsv_v_min`=100, `calib_hsv_v_max`=168)
 - **Pre-processing**: `grayscale`, `blur_ksize`, `blur_sigma`, `roi`, `downscale`
 - **Canny Edge**: `canny_low`, `canny_high`, `canny_aperture`, `canny_L2gradient`
 - **Hough Transform**: `hough_type`, `rho`, `theta_deg`, `threshold`, `min_line_length`, `max_line_gap`
