@@ -106,6 +106,16 @@ class LineDetectorNode : public rclcpp::Node {
         this->declare_parameter<double>("landmark_distance_meters", 0.59);
     calib_timeout_sec_ =
         this->declare_parameter<double>("calib_timeout_sec", 60.0);
+    calib_roi_ = this->declare_parameter<std::vector<int64_t>>(
+        "calib_roi", std::vector<int64_t>{-1, -1, -1, -1});
+    calib_hsv_s_max_ = this->declare_parameter<int>("calib_hsv_s_max", 60);
+    calib_hsv_v_min_ = this->declare_parameter<int>("calib_hsv_v_min", 60);
+    calib_hsv_v_max_ = this->declare_parameter<int>("calib_hsv_v_max", 200);
+    calib_min_area_ = this->declare_parameter<int>("calib_min_area", 80);
+    calib_min_major_px_ = this->declare_parameter<int>("calib_min_major_px", 8);
+    calib_max_major_ratio_ =
+        this->declare_parameter<double>("calib_max_major_ratio", 0.65);
+    calib_fill_min_ = this->declare_parameter<double>("calib_fill_min", 0.25);
   }
 
   void setup_publishers() {
@@ -314,15 +324,30 @@ class LineDetectorNode : public rclcpp::Node {
                draw_thickness_);
     }
 
-    // Calibration overlay: draw detected gray circle and line from camera
-    // ground foot
-    if (last_circle_valid_) {
+    // Calibration overlay: draw detected gray ellipse/circle and line from
+    // camera ground foot
+    if (last_circle_valid_ || last_ellipse_valid_) {
       cv::Scalar circle_color(0, 255, 255);  // yellow
       cv::Point c_pt(static_cast<int>(std::lround(last_circle_px_.x)),
                      static_cast<int>(std::lround(last_circle_px_.y)));
+      if (last_ellipse_valid_) {
+        cv::ellipse(vis, last_ellipse_full_, circle_color, 2);
+        c_pt = cv::Point(
+            static_cast<int>(std::lround(last_ellipse_full_.center.x)),
+            static_cast<int>(std::lround(last_ellipse_full_.center.y)));
+      }
       if (c_pt.x >= 0 && c_pt.y >= 0 && c_pt.x < vis.cols &&
           c_pt.y < vis.rows) {
         cv::circle(vis, c_pt, 6, circle_color, 2);
+      }
+      // Annotate selected candidate metrics (a/r/V/S)
+      if (last_ellipse_valid_) {
+        char txt2[80];
+        std::snprintf(txt2, sizeof(txt2), "a=%.0f r=%.2f v=%.0f s=%.0f",
+                      last_angle_deg_, last_ratio_, last_mean_v_, last_mean_s_);
+        cv::Point t2p(c_pt.x + 8, c_pt.y - 8);
+        cv::putText(vis, txt2, t2p, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                    cv::Scalar(0, 255, 255), 1);
       }
       if (has_cam_info_ && std::isfinite(estimated_pitch_rad_)) {
         // Compute ground foot projection pixel
@@ -355,6 +380,46 @@ class LineDetectorNode : public rclcpp::Node {
                       cv::Scalar(0, 255, 255), 2);
         }
       }
+    }
+
+    // Draw top calibration candidates (debug) during calibration
+    if (state_ == State::CalibratePitch && !calib_cands_.empty()) {
+      std::vector<CalibCand> cands = calib_cands_;
+      std::sort(cands.begin(), cands.end(),
+                [](const CalibCand &a, const CalibCand &b) {
+                  return a.score < b.score;
+                });
+      const int max_draw = std::min<int>(static_cast<int>(cands.size()), 8);
+      for (int i = 0; i < max_draw; ++i) {
+        const auto &cc = cands[i];
+        cv::Scalar col(255, 200, 200);
+        cv::ellipse(vis, cc.ellipse, col, 1);
+        char txt[64];
+        std::snprintf(txt, sizeof(txt), "a=%.0f r=%.2f v=%.0f s=%.0f",
+                      cc.angle_deg, cc.ratio, cc.mean_v, cc.mean_s);
+        cv::Point tp(static_cast<int>(std::lround(cc.ellipse.center.x)) + 6,
+                     static_cast<int>(std::lround(cc.ellipse.center.y)) - 6);
+        if (tp.x >= 0 && tp.y >= 0 && tp.x < vis.cols && tp.y < vis.rows) {
+          cv::putText(vis, txt, tp, cv::FONT_HERSHEY_SIMPLEX, 0.4, col, 1);
+        }
+      }
+    }
+
+    // Show calibration ROI and status text during calibration for debugging
+    if (state_ == State::CalibratePitch) {
+      // Draw calib ROI if provided
+      if (calib_roi_.size() == 4 && calib_roi_[0] >= 0 && calib_roi_[1] >= 0 &&
+          calib_roi_[2] > 0 && calib_roi_[3] > 0) {
+        cv::Rect cr(
+            static_cast<int>(calib_roi_[0]), static_cast<int>(calib_roi_[1]),
+            static_cast<int>(calib_roi_[2]), static_cast<int>(calib_roi_[3]));
+        cv::rectangle(vis, cr, cv::Scalar(255, 0, 0), 1);
+      }
+      const char *status = (last_ellipse_valid_ || last_circle_valid_)
+                               ? "landmark: detected"
+                               : "landmark: not detected";
+      cv::putText(vis, status, cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                  cv::Scalar(0, 255, 255), 2);
     }
 
     cv_bridge::CvImage out_img;
@@ -452,6 +517,19 @@ class LineDetectorNode : public rclcpp::Node {
     if (edge_close_kernel_ < 1) edge_close_kernel_ = 1;
     if ((edge_close_kernel_ % 2) == 0) edge_close_kernel_ += 1;  // make odd
     if (edge_close_iter_ < 0) edge_close_iter_ = 0;
+    // Calibration thresholds
+    if (calib_hsv_s_max_ < 0) calib_hsv_s_max_ = 0;
+    if (calib_hsv_s_max_ > 255) calib_hsv_s_max_ = 255;
+    if (calib_hsv_v_min_ < 0) calib_hsv_v_min_ = 0;
+    if (calib_hsv_v_min_ > 255) calib_hsv_v_min_ = 255;
+    if (calib_hsv_v_max_ < 0) calib_hsv_v_max_ = 0;
+    if (calib_hsv_v_max_ > 255) calib_hsv_v_max_ = 255;
+    if (calib_hsv_v_min_ > calib_hsv_v_max_)
+      std::swap(calib_hsv_v_min_, calib_hsv_v_max_);
+    if (calib_min_area_ < 0) calib_min_area_ = 0;
+    if (calib_min_major_px_ < 0) calib_min_major_px_ = 0;
+    if (calib_max_major_ratio_ <= 0.0) calib_max_major_ratio_ = 0.65;
+    if (calib_max_major_ratio_ > 1.0) calib_max_major_ratio_ = 1.0;
   }
 
   rcl_interfaces::msg::SetParametersResult on_parameters_set(
@@ -569,6 +647,22 @@ class LineDetectorNode : public rclcpp::Node {
           landmark_distance_m_ = p.as_double();
         else if (name == "calib_timeout_sec")
           calib_timeout_sec_ = p.as_double();
+        else if (name == "calib_roi")
+          calib_roi_ = p.as_integer_array();
+        else if (name == "calib_hsv_s_max")
+          calib_hsv_s_max_ = p.as_int();
+        else if (name == "calib_hsv_v_min")
+          calib_hsv_v_min_ = p.as_int();
+        else if (name == "calib_hsv_v_max")
+          calib_hsv_v_max_ = p.as_int();
+        else if (name == "calib_min_area")
+          calib_min_area_ = p.as_int();
+        else if (name == "calib_min_major_px")
+          calib_min_major_px_ = p.as_int();
+        else if (name == "calib_max_major_ratio")
+          calib_max_major_ratio_ = p.as_double();
+        else if (name == "calib_fill_min")
+          calib_fill_min_ = p.as_double();
       } catch (const std::exception &e) {
         result.successful = false;
         result.reason = e.what();
@@ -706,7 +800,37 @@ class LineDetectorNode : public rclcpp::Node {
     if (state_ == State::CalibratePitch) {
       double v_full = 0.0;
       double x_full = 0.0;
-      if (detect_landmark_center(gray, roi_rect, scale, x_full, v_full)) {
+      // reset last detections each frame
+      last_circle_valid_ = false;
+      last_ellipse_valid_ = false;
+      // Optional calibration ROI intersection (full-res coordinates)
+      cv::Rect calib_full = valid_roi(img, calib_roi_);
+      cv::Rect inter_full = calib_full & roi_rect;
+      if (calib_roi_[0] < 0 || calib_roi_[1] < 0 || calib_roi_[2] <= 0 ||
+          calib_roi_[3] <= 0) {
+        inter_full = roi_rect;
+      }
+      // Map inter_full to 'work' coordinates
+      cv::Rect inter_work;
+      inter_work.x = static_cast<int>(
+          std::floor((inter_full.x - roi_rect.x) / std::max(1e-6, scale)));
+      inter_work.y = static_cast<int>(
+          std::floor((inter_full.y - roi_rect.y) / std::max(1e-6, scale)));
+      inter_work.width =
+          static_cast<int>(std::ceil(inter_full.width / std::max(1e-6, scale)));
+      inter_work.height = static_cast<int>(
+          std::ceil(inter_full.height / std::max(1e-6, scale)));
+      inter_work &= cv::Rect(0, 0, work.cols, work.rows);
+
+      cv::Mat work_sub = work;
+      cv::Rect roi_full_for_mapping = roi_rect;
+      if (inter_work.width > 0 && inter_work.height > 0) {
+        work_sub = work(inter_work).clone();
+        roi_full_for_mapping = inter_full;
+      }
+
+      if (detect_landmark_center(work_sub, roi_full_for_mapping, scale, x_full,
+                                 v_full)) {
         last_circle_px_ = cv::Point2d(x_full, v_full);
         last_circle_valid_ = true;
         v_samples_.push_back(v_full);
@@ -753,6 +877,17 @@ class LineDetectorNode : public rclcpp::Node {
     double angle_rad;
     int age;
     int missed;
+  };
+
+  // Candidates for calibration landmark (for debug drawing)
+  struct CalibCand {
+    cv::RotatedRect ellipse;
+    double score;
+    double ratio;
+    double angle_deg;
+    double mean_s;
+    double mean_v;
+    double fill;
   };
 
   static inline double line_angle_rad(const cv::Point2f &a,
@@ -909,33 +1044,193 @@ class LineDetectorNode : public rclcpp::Node {
     }
   }
 
-  bool detect_landmark_center(const cv::Mat &gray_work, const cv::Rect &roi,
+  bool detect_landmark_center(const cv::Mat &work_img, const cv::Rect &roi,
                               double scale, double &x_full_out,
                               double &v_full_out) {
-    if (gray_work.empty()) return false;
-    cv::Mat blur;
-    cv::GaussianBlur(gray_work, blur, cv::Size(7, 7), 2.0);
-    std::vector<cv::Vec3f> circles;
-    // dp=1.5, minDist rows/4, param1/2 tuned conservatively
-    cv::HoughCircles(blur, circles, cv::HOUGH_GRADIENT, 1.5,
-                     std::max(1, blur.rows / 4), 100, 20, 3, 0);
-    if (circles.empty()) return false;
-    // Pick the largest radius circle
-    size_t best_idx = 0;
-    float best_r = circles[0][2];
-    for (size_t i = 1; i < circles.size(); ++i) {
-      if (circles[i][2] > best_r) {
-        best_r = circles[i][2];
-        best_idx = i;
+    if (work_img.empty()) return false;
+    calib_cands_.clear();
+    cv::Mat work_bgr;
+    if (work_img.channels() == 1) {
+      cv::cvtColor(work_img, work_bgr, cv::COLOR_GRAY2BGR);
+    } else {
+      work_bgr = work_img;
+    }
+    // HSV gray mask: low saturation, mid brightness
+    cv::Mat hsv;
+    cv::cvtColor(work_bgr, hsv, cv::COLOR_BGR2HSV);
+    cv::Mat mask;
+    cv::inRange(hsv, cv::Scalar(0, 0, calib_hsv_v_min_),
+                cv::Scalar(180, calib_hsv_s_max_, calib_hsv_v_max_), mask);
+    cv::medianBlur(mask, mask, 5);
+    cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+    // Open then Close to clean noise and fill the disk
+    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
+    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(mask, contours, cv::RETR_EXTERNAL,
+                     cv::CHAIN_APPROX_SIMPLE);
+
+    auto work_center = cv::Point2f(static_cast<float>(work_bgr.cols) / 2.0f,
+                                   static_cast<float>(work_bgr.rows) / 2.0f);
+    bool found = false;
+    cv::RotatedRect best_ellipse;
+    double best_score = std::numeric_limits<double>::infinity();
+    const double max_major =
+        calib_max_major_ratio_ *
+        static_cast<double>(std::min(work_bgr.cols, work_bgr.rows));
+    for (const auto &cnt : contours) {
+      if (cnt.size() < 5) continue;
+      double area = cv::contourArea(cnt);
+      if (area < static_cast<double>(calib_min_area_)) continue;
+      cv::RotatedRect e = cv::fitEllipse(cnt);
+      // Normalize so 'major' is along angle
+      double width = e.size.width, height = e.size.height;
+      double angle_deg = e.angle;
+      if (width < height) {
+        std::swap(width, height);
+        angle_deg += 90.0;
+      }
+      while (angle_deg < 0.0) angle_deg += 180.0;
+      while (angle_deg >= 180.0) angle_deg -= 180.0;
+      double major = width / 2.0;
+      double minor = height / 2.0;
+      if (major <= 0.0 || minor <= 0.0) continue;
+      if (major < static_cast<double>(calib_min_major_px_)) continue;
+      if (major > max_major) continue;  // reject too large objects
+      double ratio = minor / major;
+      if (ratio < 0.2 || ratio > 1.25) continue;  // plausible ellipse
+
+      // Grayness inside ellipse (prefer low S, mid V)
+      cv::Mat ell_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
+      cv::ellipse(ell_mask, e, cv::Scalar(255), -1);
+      cv::Scalar mean_hsv = cv::mean(hsv, ell_mask);
+      double mean_s = mean_hsv[1];
+      double mean_v = mean_hsv[2];
+      // Hard reject if interior is too dark (likely black line)
+      if (mean_v < static_cast<double>(calib_hsv_v_min_) + 10.0) continue;
+      // Fill ratio: mask pixels inside ellipse vs ellipse area
+      cv::Mat mask_inside;
+      cv::bitwise_and(mask, ell_mask, mask_inside);
+      const double ellipse_area = CV_PI * major * minor;
+      const double fill =
+          ellipse_area > 1.0
+              ? static_cast<double>(cv::countNonZero(mask_inside)) /
+                    ellipse_area
+              : 0.0;
+      if (fill < calib_fill_min_) continue;
+      double v_target = 0.5 * (static_cast<double>(calib_hsv_v_min_) +
+                               static_cast<double>(calib_hsv_v_max_));
+
+      // Scoring: center distance + size + angle preference + grayness penalties
+      double d = cv::norm(e.center - work_center);
+      double angle_pen =
+          std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
+      // We prefer horizontal major axis (squashed vertically) -> angle near
+      // 0/180
+      double score = 0.0;
+      score += d;                // center proximity
+      score += 0.05 * major;     // size penalty
+      score += 0.2 * angle_pen;  // orientation preference
+      score +=
+          0.10 * std::max(0.0, mean_s - static_cast<double>(calib_hsv_s_max_));
+      score += 0.002 * std::abs(mean_v - v_target);
+      // Record candidate for visualization (mapped to full image coords)
+      cv::RotatedRect e_full(
+          cv::Point2f(static_cast<float>(e.center.x * scale + roi.x),
+                      static_cast<float>(e.center.y * scale + roi.y)),
+          cv::Size2f(static_cast<float>(e.size.width * scale),
+                     static_cast<float>(e.size.height * scale)),
+          e.angle);
+      calib_cands_.push_back(
+          CalibCand{e_full, score, ratio, angle_deg, mean_s, mean_v, fill});
+      if (score < best_score) {
+        best_score = score;
+        best_ellipse = e;
+        found = true;
       }
     }
-    const float cx_work = circles[best_idx][0];
-    const float cy_work = circles[best_idx][1];
-    // Map to full image indices
-    const double v_full = static_cast<double>(cy_work) * scale + roi.y;
-    const double x_full = static_cast<double>(cx_work) * scale + roi.x;
-    v_full_out = v_full;
+
+    // Edge-based fallback within HSV mask region
+    if (!found) {
+      cv::Mat gray;
+      cv::cvtColor(work_bgr, gray, cv::COLOR_BGR2GRAY);
+      cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.2);
+      cv::Mat edges;
+      cv::Canny(gray, edges, 60, 180, 3, true);
+      cv::bitwise_and(edges, mask, edges);
+      cv::Mat kd = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+      cv::dilate(edges, edges, kd);
+      std::vector<std::vector<cv::Point>> ctr2;
+      cv::findContours(edges, ctr2, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+      for (const auto &cnt : ctr2) {
+        if (cnt.size() < 20) continue;
+        double area2 = cv::contourArea(cnt);
+        if (area2 < 60.0) continue;
+        if (cnt.size() >= 5) {
+          cv::RotatedRect e = cv::fitEllipse(cnt);
+          double major = std::max(e.size.width, e.size.height) / 2.0;
+          double minor = std::min(e.size.width, e.size.height) / 2.0;
+          if (major <= 0.0 || minor <= 0.0) continue;
+          if (major > max_major) continue;
+          double ratio2 = minor / major;
+          if (ratio2 < 0.2 || ratio2 > 1.3) continue;
+          double d = cv::norm(e.center - work_center);
+          double score = d + 0.12 * major;
+          if (score < best_score) {
+            best_score = score;
+            best_ellipse = e;
+            found = true;
+          }
+        }
+      }
+    }
+
+    if (!found) return false;
+
+    // Recompute metrics for the selected ellipse (in work coordinates)
+    double sel_width = best_ellipse.size.width;
+    double sel_height = best_ellipse.size.height;
+    double sel_angle_deg = best_ellipse.angle;
+    if (sel_width < sel_height) {
+      std::swap(sel_width, sel_height);
+      sel_angle_deg += 90.0;
+    }
+    while (sel_angle_deg < 0.0) sel_angle_deg += 180.0;
+    while (sel_angle_deg >= 180.0) sel_angle_deg -= 180.0;
+    double sel_major = sel_width / 2.0;
+    double sel_minor = sel_height / 2.0;
+    cv::Mat sel_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
+    cv::ellipse(sel_mask, best_ellipse, cv::Scalar(255), -1);
+    cv::Scalar sel_mean_hsv = cv::mean(hsv, sel_mask);
+    last_mean_s_ = sel_mean_hsv[1];
+    last_mean_v_ = sel_mean_hsv[2];
+    last_ratio_ = (sel_major > 1e-9) ? (sel_minor / sel_major) : 0.0;
+    last_angle_deg_ = sel_angle_deg;
+    const double sel_area = CV_PI * sel_major * sel_minor;
+    if (sel_area > 1.0) {
+      cv::Mat mask_inside;
+      cv::bitwise_and(mask, sel_mask, mask_inside);
+      last_fill_ =
+          static_cast<double>(cv::countNonZero(mask_inside)) / sel_area;
+    } else {
+      last_fill_ = 0.0;
+    }
+
+    // Map to full image coordinates
+    const double x_full =
+        static_cast<double>(best_ellipse.center.x) * scale + roi.x;
+    const double v_full =
+        static_cast<double>(best_ellipse.center.y) * scale + roi.y;
     x_full_out = x_full;
+    v_full_out = v_full;
+    // Store last ellipse in full-res coordinates for overlay
+    last_ellipse_full_ = cv::RotatedRect(
+        cv::Point2f(static_cast<float>(x_full), static_cast<float>(v_full)),
+        cv::Size2f(static_cast<float>(best_ellipse.size.width * scale),
+                   static_cast<float>(best_ellipse.size.height * scale)),
+        best_ellipse.angle);
+    last_ellipse_valid_ = true;
     return true;
   }
 
@@ -1062,6 +1357,14 @@ class LineDetectorNode : public rclcpp::Node {
   double camera_height_m_{};
   double landmark_distance_m_{};
   double calib_timeout_sec_{};
+  std::vector<int64_t> calib_roi_{};  // optional [x,y,w,h] in full image
+  int calib_hsv_s_max_{};
+  int calib_hsv_v_min_{};
+  int calib_hsv_v_max_{};
+  int calib_min_area_{};
+  int calib_min_major_px_{};
+  double calib_max_major_ratio_{};
+  double calib_fill_min_{};
   double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
   bool calib_started_{false};
   rclcpp::Time calib_start_time_{};
@@ -1070,6 +1373,15 @@ class LineDetectorNode : public rclcpp::Node {
   static constexpr size_t kMaxCalibSamples = 30;
   bool last_circle_valid_{false};
   cv::Point2d last_circle_px_{};
+  bool last_ellipse_valid_{false};
+  cv::RotatedRect last_ellipse_full_{};
+  std::vector<CalibCand> calib_cands_;
+  // Selected landmark metrics (for overlay)
+  double last_angle_deg_{};
+  double last_ratio_{};
+  double last_mean_s_{};
+  double last_mean_v_{};
+  double last_fill_{};
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
