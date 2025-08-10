@@ -103,7 +103,7 @@ class LineDetectorNode : public rclcpp::Node {
     camera_height_m_ =
         this->declare_parameter<double>("camera_height_meters", 0.2);
     landmark_distance_m_ =
-        this->declare_parameter<double>("landmark_distance_meters", 0.7);
+        this->declare_parameter<double>("landmark_distance_meters", 0.59);
     calib_timeout_sec_ =
         this->declare_parameter<double>("calib_timeout_sec", 60.0);
   }
@@ -312,6 +312,49 @@ class LineDetectorNode : public rclcpp::Node {
                           static_cast<int>(draw_color_bgr_[1]),
                           static_cast<int>(draw_color_bgr_[2])),
                draw_thickness_);
+    }
+
+    // Calibration overlay: draw detected gray circle and line from camera
+    // ground foot
+    if (last_circle_valid_) {
+      cv::Scalar circle_color(0, 255, 255);  // yellow
+      cv::Point c_pt(static_cast<int>(std::lround(last_circle_px_.x)),
+                     static_cast<int>(std::lround(last_circle_px_.y)));
+      if (c_pt.x >= 0 && c_pt.y >= 0 && c_pt.x < vis.cols &&
+          c_pt.y < vis.rows) {
+        cv::circle(vis, c_pt, 6, circle_color, 2);
+      }
+      if (has_cam_info_ && std::isfinite(estimated_pitch_rad_)) {
+        // Compute ground foot projection pixel
+        double tan_theta = std::tan(estimated_pitch_rad_);
+        if (std::abs(tan_theta) > 1e-6) {
+          double v0 = cy_ - fy_ / tan_theta;  // row of camera ground foot
+          double u0 = cx_;                    // column at principal point
+          cv::Point p0(static_cast<int>(std::lround(u0)),
+                       static_cast<int>(std::lround(v0)));
+          cv::Point p1 = c_pt;
+          cv::Rect rect(0, 0, vis.cols, vis.rows);
+          cv::Point p0c = p0, p1c = p1;
+          if (cv::clipLine(rect, p0c, p1c)) {
+            cv::line(vis, p0c, p1c, cv::Scalar(255, 200, 0), 2);
+            cv::circle(vis, p0c, 4, cv::Scalar(0, 128, 255), -1);
+          }
+          // Overlay text with distance and pitch
+          char buf[128];
+          std::snprintf(buf, sizeof(buf), "D=%.2fm, pitch=%.2f deg",
+                        landmark_distance_m_,
+                        estimated_pitch_rad_ * 180.0 / CV_PI);
+          int baseline = 0;
+          cv::Size txt =
+              cv::getTextSize(buf, cv::FONT_HERSHEY_SIMPLEX, 0.6, 2, &baseline);
+          cv::Point org(10, 20 + txt.height);
+          cv::rectangle(vis, org + cv::Point(0, baseline),
+                        org + cv::Point(txt.width, -txt.height),
+                        cv::Scalar(0, 0, 0), cv::FILLED);
+          cv::putText(vis, buf, org, cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                      cv::Scalar(0, 255, 255), 2);
+        }
+      }
     }
 
     cv_bridge::CvImage out_img;
@@ -662,7 +705,10 @@ class LineDetectorNode : public rclcpp::Node {
     // Calibration mode processing (detect gray circle and estimate pitch)
     if (state_ == State::CalibratePitch) {
       double v_full = 0.0;
-      if (detect_landmark_row_v(gray, roi_rect, scale, v_full)) {
+      double x_full = 0.0;
+      if (detect_landmark_center(gray, roi_rect, scale, x_full, v_full)) {
+        last_circle_px_ = cv::Point2d(x_full, v_full);
+        last_circle_valid_ = true;
         v_samples_.push_back(v_full);
         if (v_samples_.size() > kMaxCalibSamples) {
           v_samples_.erase(v_samples_.begin());
@@ -863,8 +909,9 @@ class LineDetectorNode : public rclcpp::Node {
     }
   }
 
-  bool detect_landmark_row_v(const cv::Mat &gray_work, const cv::Rect &roi,
-                             double scale, double &v_full_out) {
+  bool detect_landmark_center(const cv::Mat &gray_work, const cv::Rect &roi,
+                              double scale, double &x_full_out,
+                              double &v_full_out) {
     if (gray_work.empty()) return false;
     cv::Mat blur;
     cv::GaussianBlur(gray_work, blur, cv::Size(7, 7), 2.0);
@@ -882,11 +929,13 @@ class LineDetectorNode : public rclcpp::Node {
         best_idx = i;
       }
     }
+    const float cx_work = circles[best_idx][0];
     const float cy_work = circles[best_idx][1];
-    // Map to full image row index
-    const double v_full =
-        std::round(static_cast<double>(cy_work) * scale) + roi.y;
+    // Map to full image indices
+    const double v_full = static_cast<double>(cy_work) * scale + roi.y;
+    const double x_full = static_cast<double>(cx_work) * scale + roi.x;
     v_full_out = v_full;
+    x_full_out = x_full;
     return true;
   }
 
@@ -932,6 +981,11 @@ class LineDetectorNode : public rclcpp::Node {
     // Sanity clamp to [-45, 45] deg
     const double max_rad = 45.0 * CV_PI / 180.0;
     const double pitch_rad = std::max(-max_rad, std::min(theta, max_rad));
+    if (calib_timeout_sec_ == 0.0) {
+      // Continuous calibration mode: keep updating pitch and stay in this state
+      estimated_pitch_rad_ = pitch_rad;
+      return;
+    }
     transition_to_ready(pitch_rad);
   }
 
@@ -1014,6 +1068,8 @@ class LineDetectorNode : public rclcpp::Node {
   std::vector<double> v_samples_{};
   static constexpr size_t kMinCalibSamples = 10;
   static constexpr size_t kMaxCalibSamples = 30;
+  bool last_circle_valid_{false};
+  cv::Point2d last_circle_px_{};
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;

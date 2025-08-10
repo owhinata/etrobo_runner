@@ -80,7 +80,7 @@ The GUI provides:
 
 ## Parameters (excerpt)
 - **I/O**: `image_topic`, `use_color_output`, `publish_image_with_lines`
-- **Calibration**: `camera_info_topic` (string), `camera_height_meters` (double; default 0.2), `landmark_distance_meters` (double; default 0.7), `calib_timeout_sec` (double; default 60.0)
+- **Calibration**: `camera_info_topic` (string), `camera_height_meters` (double; default 0.2), `landmark_distance_meters` (double; default 0.59), `calib_timeout_sec` (double; default 60.0; set 0 to disable timeout and keep calibrating continuously)
 - **Pre-processing**: `grayscale`, `blur_ksize`, `blur_sigma`, `roi`, `downscale`
 - **Canny Edge**: `canny_low`, `canny_high`, `canny_aperture`, `canny_L2gradient`
 - **Hough Transform**: `hough_type`, `rho`, `theta_deg`, `threshold`, `min_line_length`, `max_line_gap`

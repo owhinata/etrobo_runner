@@ -13,8 +13,8 @@
 - Parameters:
   - `camera_info_topic` (string; default: `camera_info`)
   - `camera_height_meters` (double; default: `0.2`)
-  - `landmark_distance_meters` (double; default: `0.7`)
-  - `calib_timeout_sec` (double; default: `60.0`)
+  - `landmark_distance_meters` (double; default: `0.59`)
+  - `calib_timeout_sec` (double; default: `60.0`; `0` disables timeout and keeps calibration running)
   - Uses an internal buffer of landmark detections (median of ~10 samples) to robustly estimate pitch.
 
 ## Topics
