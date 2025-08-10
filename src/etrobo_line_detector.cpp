@@ -346,8 +346,24 @@ class LineDetectorNode : public rclcpp::Node {
         std::snprintf(txt2, sizeof(txt2), "a=%.0f r=%.2f v=%.0f s=%.0f",
                       last_angle_deg_, last_ratio_, last_mean_v_, last_mean_s_);
         cv::Point t2p(c_pt.x + 8, c_pt.y - 8);
-        cv::putText(vis, txt2, t2p, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                    cv::Scalar(0, 255, 255), 1);
+
+        // Add semi-transparent gray background for better visibility
+        int baseline = 0;
+        cv::Size text_size =
+            cv::getTextSize(txt2, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
+        cv::Mat overlay;
+        vis.copyTo(overlay);
+        cv::rectangle(
+            overlay, cv::Point(t2p.x - 2, t2p.y - text_size.height - baseline),
+            cv::Point(t2p.x + text_size.width + 2, t2p.y + baseline + 2),
+            cv::Scalar(128, 128, 128), cv::FILLED);  // Gray background
+        cv::addWeighted(vis, 0.7, overlay, 0.3, 0,
+                        vis);  // Semi-transparent blend
+
+        // Draw text with smaller font and normal thickness
+        cv::putText(vis, txt2, t2p, cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                    cv::Scalar(0, 255, 255),
+                    1);  // Yellow text, normal thickness
       }
       if (has_cam_info_ && std::isfinite(estimated_pitch_rad_)) {
         // Compute ground foot projection pixel
@@ -371,41 +387,24 @@ class LineDetectorNode : public rclcpp::Node {
                         estimated_pitch_rad_ * 180.0 / CV_PI);
           int baseline = 0;
           cv::Size txt =
-              cv::getTextSize(buf, cv::FONT_HERSHEY_SIMPLEX, 0.6, 2, &baseline);
+              cv::getTextSize(buf, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
           cv::Point org(10, 20 + txt.height);
-          cv::rectangle(vis, org + cv::Point(0, baseline),
+
+          // Semi-transparent gray background
+          cv::Mat overlay;
+          vis.copyTo(overlay);
+          cv::rectangle(overlay, org + cv::Point(0, baseline),
                         org + cv::Point(txt.width, -txt.height),
-                        cv::Scalar(0, 0, 0), cv::FILLED);
-          cv::putText(vis, buf, org, cv::FONT_HERSHEY_SIMPLEX, 0.6,
-                      cv::Scalar(0, 255, 255), 2);
+                        cv::Scalar(128, 128, 128), cv::FILLED);
+          cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
+
+          cv::putText(vis, buf, org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                      cv::Scalar(0, 255, 255), 1);  // Normal thickness
         }
       }
     }
 
-    // Draw top calibration candidates (debug) during calibration
-    if (state_ == State::CalibratePitch && !calib_cands_.empty()) {
-      std::vector<CalibCand> cands = calib_cands_;
-      std::sort(cands.begin(), cands.end(),
-                [](const CalibCand &a, const CalibCand &b) {
-                  return a.score < b.score;
-                });
-      const int max_draw = std::min<int>(static_cast<int>(cands.size()), 8);
-      for (int i = 0; i < max_draw; ++i) {
-        const auto &cc = cands[i];
-        cv::Scalar col(255, 200, 200);
-        cv::ellipse(vis, cc.ellipse, col, 1);
-        char txt[64];
-        std::snprintf(txt, sizeof(txt), "a=%.0f r=%.2f v=%.0f s=%.0f",
-                      cc.angle_deg, cc.ratio, cc.mean_v, cc.mean_s);
-        cv::Point tp(static_cast<int>(std::lround(cc.ellipse.center.x)) + 6,
-                     static_cast<int>(std::lround(cc.ellipse.center.y)) - 6);
-        if (tp.x >= 0 && tp.y >= 0 && tp.x < vis.cols && tp.y < vis.rows) {
-          cv::putText(vis, txt, tp, cv::FONT_HERSHEY_SIMPLEX, 0.4, col, 1);
-        }
-      }
-    }
-
-    // Show calibration ROI and status text during calibration for debugging
+    // Show calibration ROI and HSV mask during calibration for debugging
     if (state_ == State::CalibratePitch) {
       // Draw calib ROI if provided
       if (calib_roi_.size() == 4 && calib_roi_[0] >= 0 && calib_roi_[1] >= 0 &&
@@ -415,11 +414,48 @@ class LineDetectorNode : public rclcpp::Node {
             static_cast<int>(calib_roi_[2]), static_cast<int>(calib_roi_[3]));
         cv::rectangle(vis, cr, cv::Scalar(255, 0, 0), 1);
       }
-      const char *status = (last_ellipse_valid_ || last_circle_valid_)
-                               ? "landmark: detected"
-                               : "landmark: not detected";
-      cv::putText(vis, status, cv::Point(10, 24), cv::FONT_HERSHEY_SIMPLEX, 0.6,
-                  cv::Scalar(0, 255, 255), 2);
+
+      // Show HSV mask in top-right corner
+      if (!last_calib_hsv_mask_.empty()) {
+        const int mask_display_width = 160;   // Display width
+        const int mask_display_height = 120;  // Display height
+        const int margin = 10;
+
+        // Resize HSV mask for display
+        cv::Mat mask_display;
+        cv::resize(last_calib_hsv_mask_, mask_display,
+                   cv::Size(mask_display_width, mask_display_height), 0, 0,
+                   cv::INTER_NEAREST);
+
+        // Convert to BGR for overlay
+        cv::Mat mask_bgr;
+        cv::cvtColor(mask_display, mask_bgr, cv::COLOR_GRAY2BGR);
+
+        // Position in top-right corner
+        cv::Point mask_pos(vis.cols - mask_display_width - margin, margin);
+        cv::Rect mask_rect(mask_pos.x, mask_pos.y, mask_display_width,
+                           mask_display_height);
+
+        // Check bounds and copy
+        if (mask_pos.x >= 0 && mask_pos.y >= 0 &&
+            mask_pos.x + mask_display_width <= vis.cols &&
+            mask_pos.y + mask_display_height <= vis.rows) {
+          // Add semi-transparent background
+          cv::Mat overlay;
+          vis.copyTo(overlay);
+          cv::rectangle(overlay, mask_rect, cv::Scalar(0, 0, 0), cv::FILLED);
+          cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
+
+          // Overlay the mask
+          mask_bgr.copyTo(vis(mask_rect));
+
+          // Add border and label
+          cv::rectangle(vis, mask_rect, cv::Scalar(128, 128, 128), 2);
+          cv::putText(vis, "HSV Mask", cv::Point(mask_pos.x, mask_pos.y + 10),
+                      cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255, 255, 255),
+                      1);
+        }
+      }
     }
 
     cv_bridge::CvImage out_img;
@@ -879,17 +915,6 @@ class LineDetectorNode : public rclcpp::Node {
     int missed;
   };
 
-  // Candidates for calibration landmark (for debug drawing)
-  struct CalibCand {
-    cv::RotatedRect ellipse;
-    double score;
-    double ratio;
-    double angle_deg;
-    double mean_s;
-    double mean_v;
-    double fill;
-  };
-
   static inline double line_angle_rad(const cv::Point2f &a,
                                       const cv::Point2f &b) {
     return std::atan2(b.y - a.y, b.x - a.x);
@@ -1048,7 +1073,6 @@ class LineDetectorNode : public rclcpp::Node {
                               double scale, double &x_full_out,
                               double &v_full_out) {
     if (work_img.empty()) return false;
-    calib_cands_.clear();
     cv::Mat work_bgr;
     if (work_img.channels() == 1) {
       cv::cvtColor(work_img, work_bgr, cv::COLOR_GRAY2BGR);
@@ -1066,6 +1090,9 @@ class LineDetectorNode : public rclcpp::Node {
     // Open then Close to clean noise and fill the disk
     cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
     cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
+
+    // Store processed HSV mask for debug visualization
+    last_calib_hsv_mask_ = mask.clone();
 
     std::vector<std::vector<cv::Point>> contours;
     cv::findContours(mask, contours, cv::RETR_EXTERNAL,
@@ -1142,8 +1169,6 @@ class LineDetectorNode : public rclcpp::Node {
           cv::Size2f(static_cast<float>(e.size.width * scale),
                      static_cast<float>(e.size.height * scale)),
           e.angle);
-      calib_cands_.push_back(
-          CalibCand{e_full, score, ratio, angle_deg, mean_s, mean_v, fill});
       if (score < best_score) {
         best_score = score;
         best_ellipse = e;
@@ -1375,13 +1400,14 @@ class LineDetectorNode : public rclcpp::Node {
   cv::Point2d last_circle_px_{};
   bool last_ellipse_valid_{false};
   cv::RotatedRect last_ellipse_full_{};
-  std::vector<CalibCand> calib_cands_;
   // Selected landmark metrics (for overlay)
   double last_angle_deg_{};
   double last_ratio_{};
   double last_mean_s_{};
   double last_mean_v_{};
   double last_fill_{};
+  // HSV mask for debug visualization
+  cv::Mat last_calib_hsv_mask_;
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
