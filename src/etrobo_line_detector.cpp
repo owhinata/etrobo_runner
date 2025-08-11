@@ -142,16 +142,16 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
-                           cv::Mat &original_img, cv::Rect &roi_rect,
-                           double &scale) {
+                           cv::Mat &original_img, cv::Mat &work_img,
+                           cv::Rect &roi_rect, double &scale) {
     // Convert to cv::Mat
     cv_bridge::CvImageConstPtr cv_ptr;
     try {
       if (msg->encoding == sensor_msgs::image_encodings::BGR8 ||
-          msg->encoding == sensor_msgs::image_encodings::RGB8 ||
           msg->encoding == sensor_msgs::image_encodings::MONO8) {
         cv_ptr = cv_bridge::toCvShare(msg, msg->encoding);
       } else {
+        // Convert all other encodings (including RGB8) to BGR8
         cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
       }
     } catch (const cv_bridge::Exception &e) {
@@ -159,25 +159,13 @@ class LineDetectorNode : public rclcpp::Node {
       return cv::Mat();
     }
 
-    cv::Mat img;
-    if (cv_ptr->encoding == sensor_msgs::image_encodings::RGB8) {
-      cv::cvtColor(cv_ptr->image, img, cv::COLOR_RGB2BGR);
-    } else if (cv_ptr->encoding == sensor_msgs::image_encodings::BGR8) {
-      img = cv_ptr->image;
-    } else if (cv_ptr->encoding == sensor_msgs::image_encodings::MONO8) {
-      img = cv_ptr->image;
-    } else {
-      // already converted to BGR8 above
-      img = cv_ptr->image;
-    }
-
+    cv::Mat img = cv_ptr->image;
     original_img = img;
 
-    // ROI
+    // ROI + Downscale
     roi_rect = valid_roi(img, roi_);
     cv::Mat work = img(roi_rect).clone();
 
-    // Downscale
     scale = 1.0;
     if (downscale_ != 1.0) {
       scale = std::max(1e-6, downscale_);
@@ -187,12 +175,14 @@ class LineDetectorNode : public rclcpp::Node {
       work = tmp;
     }
 
+    work_img = work;  // save downscaled work image
+
     // Convert to grayscale for Canny edge detection
     cv::Mat gray;
     if (work.channels() == 3) {
       cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
     } else {
-      gray = work;
+      gray = work.clone();  // clone to avoid sharing the same pointer
     }
 
     // Apply blur if enabled
@@ -451,18 +441,6 @@ class LineDetectorNode : public rclcpp::Node {
     lines_pub_->publish(lines_msg);
   }
 
-  cv::Mat prepare_work_image(const cv::Mat &img, const cv::Rect &roi_rect,
-                             double scale) {
-    cv::Mat work = img(roi_rect).clone();
-    if (downscale_ != 1.0) {
-      cv::Mat tmp;
-      cv::resize(work, tmp, cv::Size(), 1.0 / scale, 1.0 / scale,
-                 cv::INTER_AREA);
-      work = tmp;
-    }
-    return work;
-  }
-
   void sanitize_parameters() {
     if (blur_ksize_ <= 0) blur_ksize_ = 1;
     if (blur_ksize_ % 2 == 0) blur_ksize_ += 1;  // must be odd
@@ -719,29 +697,26 @@ class LineDetectorNode : public rclcpp::Node {
     }
 
     // Step 1: Preprocess image
-    cv::Mat img;
+    cv::Mat img, work;
     cv::Rect roi_rect;
     double scale;
-    cv::Mat gray = preprocess_image(msg, img, roi_rect, scale);
+    cv::Mat gray = preprocess_image(msg, img, work, roi_rect, scale);
     if (gray.empty()) return;
 
-    // Step 2: Prepare work image for edge detection
-    cv::Mat work = prepare_work_image(img, roi_rect, scale);
-
-    // Step 3: Detect edges
+    // Step 2: Detect edges
     cv::Mat edges = detect_edges(gray, work);
 
-    // Step 4: Detect lines
+    // Step 3: Detect lines
     std::vector<cv::Vec4i> segments = detect_lines(edges);
 
-    // Step 5: Restore coordinates to original scale and ROI
+    // Step 4: Restore coordinates to original scale and ROI
     std::vector<cv::Vec4i> segments_full =
         restore_coordinates(segments, roi_rect, scale);
 
-    // Step 6: Use segments directly without temporal smoothing
+    // Step 5: Use segments directly without temporal smoothing
     std::vector<cv::Vec4i> segments_out = segments_full;
 
-    // Step 7: Publish results
+    // Step 6: Publish results
     std_msgs::msg::Header header = msg->header;
     publish_visualization(segments_out, img, header);
     if (state_ == State::Ready) {
@@ -794,7 +769,7 @@ class LineDetectorNode : public rclcpp::Node {
       try_finalize_calibration();
     }
 
-    // Step 8: Log timing
+    // Step 7: Log timing
     const auto t1 = std::chrono::steady_clock::now();
     const double ms =
         std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
