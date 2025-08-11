@@ -41,7 +41,7 @@ class LineDetectorNode : public rclcpp::Node {
     image_topic_ = this->declare_parameter<std::string>("image_topic", "image");
     camera_info_topic_ = this->declare_parameter<std::string>(
         "camera_info_topic", "camera_info");
-    use_color_output_ = this->declare_parameter<bool>("use_color_output", true);
+
     publish_image_ =
         this->declare_parameter<bool>("publish_image_with_lines", false);
 
@@ -279,32 +279,32 @@ class LineDetectorNode : public rclcpp::Node {
     if (!image_pub_) return;
 
     cv::Mat vis;
-    if (use_color_output_) {
-      if (original_img.channels() == 1) {
-        cv::cvtColor(original_img, vis, cv::COLOR_GRAY2BGR);
-      } else {
-        vis = original_img.clone();
-      }
+    if (original_img.channels() == 1) {
+      cv::cvtColor(original_img, vis, cv::COLOR_GRAY2BGR);
     } else {
-      if (original_img.channels() == 3) {
-        cv::cvtColor(original_img, vis, cv::COLOR_BGR2GRAY);
-      } else {
-        vis = original_img.clone();
-      }
+      vis = original_img.clone();
     }
 
-    for (const auto &l : segments) {
-      cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
-               cv::Scalar(static_cast<int>(draw_color_bgr_[0]),
+    // Draw line segments with BGR color
+    cv::Scalar line_color(static_cast<int>(draw_color_bgr_[0]),
                           static_cast<int>(draw_color_bgr_[1]),
-                          static_cast<int>(draw_color_bgr_[2])),
+                          static_cast<int>(draw_color_bgr_[2]));
+
+    for (const auto &l : segments) {
+      cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), line_color,
                draw_thickness_);
     }
 
     // Calibration overlay: draw detected gray ellipse/circle and line from
     // camera ground foot
     if (last_circle_valid_ || last_ellipse_valid_) {
+      // Fixed colors for calibration display
       cv::Scalar circle_color(0, 255, 255);  // yellow
+      cv::Scalar text_color(0, 255, 255);    // yellow
+      cv::Scalar line_color(255, 200, 0);    // cyan
+      cv::Scalar point_color(0, 128, 255);   // orange
+      cv::Scalar bg_color(128, 128, 128);    // gray
+
       cv::Point c_pt(static_cast<int>(std::lround(last_circle_px_.x)),
                      static_cast<int>(std::lround(last_circle_px_.y)));
       if (last_ellipse_valid_) {
@@ -333,14 +333,12 @@ class LineDetectorNode : public rclcpp::Node {
         cv::rectangle(
             overlay, cv::Point(t2p.x - 2, t2p.y - text_size.height - baseline),
             cv::Point(t2p.x + text_size.width + 2, t2p.y + baseline + 2),
-            cv::Scalar(128, 128, 128), cv::FILLED);  // Gray background
-        cv::addWeighted(vis, 0.7, overlay, 0.3, 0,
-                        vis);  // Semi-transparent blend
+            bg_color, cv::FILLED);
+        cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
 
         // Draw text with smaller font and normal thickness
-        cv::putText(vis, txt2, t2p, cv::FONT_HERSHEY_SIMPLEX, 0.4,
-                    cv::Scalar(0, 255, 255),
-                    1);  // Yellow text, normal thickness
+        cv::putText(vis, txt2, t2p, cv::FONT_HERSHEY_SIMPLEX, 0.4, text_color,
+                    1);
       }
       if (has_cam_info_ && std::isfinite(estimated_pitch_rad_)) {
         // Compute ground foot projection pixel
@@ -354,8 +352,8 @@ class LineDetectorNode : public rclcpp::Node {
           cv::Rect rect(0, 0, vis.cols, vis.rows);
           cv::Point p0c = p0, p1c = p1;
           if (cv::clipLine(rect, p0c, p1c)) {
-            cv::line(vis, p0c, p1c, cv::Scalar(255, 200, 0), 2);
-            cv::circle(vis, p0c, 4, cv::Scalar(0, 128, 255), -1);
+            cv::line(vis, p0c, p1c, line_color, 2);
+            cv::circle(vis, p0c, 4, point_color, -1);
           }
           // Overlay text with distance and pitch
           char buf[128];
@@ -371,25 +369,28 @@ class LineDetectorNode : public rclcpp::Node {
           cv::Mat overlay;
           vis.copyTo(overlay);
           cv::rectangle(overlay, org + cv::Point(0, baseline),
-                        org + cv::Point(txt.width, -txt.height),
-                        cv::Scalar(128, 128, 128), cv::FILLED);
+                        org + cv::Point(txt.width, -txt.height), bg_color,
+                        cv::FILLED);
           cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
 
-          cv::putText(vis, buf, org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                      cv::Scalar(0, 255, 255), 1);  // Normal thickness
+          cv::putText(vis, buf, org, cv::FONT_HERSHEY_SIMPLEX, 0.5, text_color,
+                      1);
         }
       }
     }
 
     // Show calibration ROI and HSV mask during calibration for debugging
     if (state_ == State::CalibratePitch) {
+      // Fixed color for calibration ROI
+      cv::Scalar calib_rect_color(255, 0, 0);  // blue
+
       // Draw calib ROI if provided
       if (calib_roi_.size() == 4 && calib_roi_[0] >= 0 && calib_roi_[1] >= 0 &&
           calib_roi_[2] > 0 && calib_roi_[3] > 0) {
         cv::Rect cr(
             static_cast<int>(calib_roi_[0]), static_cast<int>(calib_roi_[1]),
             static_cast<int>(calib_roi_[2]), static_cast<int>(calib_roi_[3]));
-        cv::rectangle(vis, cr, cv::Scalar(255, 0, 0), 1);
+        cv::rectangle(vis, cr, calib_rect_color, 1);
       }
 
       // Show HSV mask in top-right corner
@@ -404,9 +405,9 @@ class LineDetectorNode : public rclcpp::Node {
                    cv::Size(mask_display_width, mask_display_height), 0, 0,
                    cv::INTER_NEAREST);
 
-        // Convert to BGR for overlay
-        cv::Mat mask_bgr;
-        cv::cvtColor(mask_display, mask_bgr, cv::COLOR_GRAY2BGR);
+        // Convert mask to BGR for overlay
+        cv::Mat mask_overlay;
+        cv::cvtColor(mask_display, mask_overlay, cv::COLOR_GRAY2BGR);
 
         // Position in top-right corner
         cv::Point mask_pos(vis.cols - mask_display_width - margin, margin);
@@ -424,7 +425,7 @@ class LineDetectorNode : public rclcpp::Node {
           cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
 
           // Overlay the mask
-          mask_bgr.copyTo(vis(mask_rect));
+          mask_overlay.copyTo(vis(mask_rect));
 
           // Add border and label
           cv::rectangle(vis, mask_rect, cv::Scalar(128, 128, 128), 2);
@@ -437,8 +438,7 @@ class LineDetectorNode : public rclcpp::Node {
 
     cv_bridge::CvImage out_img;
     out_img.header = header;
-    out_img.encoding = use_color_output_ ? sensor_msgs::image_encodings::BGR8
-                                         : sensor_msgs::image_encodings::MONO8;
+    out_img.encoding = sensor_msgs::image_encodings::BGR8;
     out_img.image = vis;
     image_pub_->publish(*out_img.toImageMsg());
   }
@@ -528,9 +528,7 @@ class LineDetectorNode : public rclcpp::Node {
     for (const auto &p : params) {
       const auto &name = p.get_name();
       try {
-        if (name == "use_color_output")
-          use_color_output_ = p.as_bool();
-        else if (name == "grayscale")
+        if (name == "grayscale")
           grayscale_ = p.as_bool();
         else if (name == "use_hsv_mask")
           use_hsv_mask_ = p.as_bool();
@@ -1087,7 +1085,6 @@ class LineDetectorNode : public rclcpp::Node {
   // Parameters
   std::string image_topic_;
   std::string camera_info_topic_;
-  bool use_color_output_{};
   bool publish_image_{};
   bool grayscale_{};
   bool use_hsv_mask_{};

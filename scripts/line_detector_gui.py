@@ -151,7 +151,6 @@ class LineDetectorParameterGUI:
         self.parameter_definitions = {
             "I/O Settings": {
                 "image_topic": {"type": "string", "default": "image"},
-                "use_color_output": {"type": "bool", "default": True},
                 "publish_image_with_lines": {"type": "bool", "default": False}
             },
             "Pre-processing": {
