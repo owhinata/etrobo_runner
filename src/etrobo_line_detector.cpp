@@ -45,7 +45,6 @@ class LineDetectorNode : public rclcpp::Node {
     publish_image_ =
         this->declare_parameter<bool>("publish_image_with_lines", false);
 
-    grayscale_ = this->declare_parameter<bool>("grayscale", true);
     use_hsv_mask_ = this->declare_parameter<bool>("use_hsv_mask", true);
     blur_ksize_ = this->declare_parameter<int>("blur_ksize", 5);
     blur_sigma_ = this->declare_parameter<double>("blur_sigma", 1.5);
@@ -188,22 +187,15 @@ class LineDetectorNode : public rclcpp::Node {
       work = tmp;
     }
 
-    // Grayscale and blur
+    // Convert to grayscale for Canny edge detection
     cv::Mat gray;
-    if (grayscale_) {
-      if (work.channels() == 3) {
-        cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
-      } else {
-        gray = work;
-      }
+    if (work.channels() == 3) {
+      cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
     } else {
-      // operate on one channel anyway for Canny
-      if (work.channels() == 3) {
-        cv::cvtColor(work, gray, cv::COLOR_BGR2GRAY);
-      } else {
-        gray = work;
-      }
+      gray = work;
     }
+
+    // Apply blur if enabled
     if (blur_ksize_ > 1) {
       cv::GaussianBlur(gray, gray, cv::Size(blur_ksize_, blur_ksize_),
                        blur_sigma_);
@@ -528,9 +520,7 @@ class LineDetectorNode : public rclcpp::Node {
     for (const auto &p : params) {
       const auto &name = p.get_name();
       try {
-        if (name == "grayscale")
-          grayscale_ = p.as_bool();
-        else if (name == "use_hsv_mask")
+        if (name == "use_hsv_mask")
           use_hsv_mask_ = p.as_bool();
         else if (name == "blur_ksize")
           blur_ksize_ = p.as_int();
@@ -1086,7 +1076,6 @@ class LineDetectorNode : public rclcpp::Node {
   std::string image_topic_;
   std::string camera_info_topic_;
   bool publish_image_{};
-  bool grayscale_{};
   bool use_hsv_mask_{};
   int blur_ksize_{};
   double blur_sigma_{};

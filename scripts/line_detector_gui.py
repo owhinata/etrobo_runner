@@ -154,7 +154,6 @@ class LineDetectorParameterGUI:
                 "publish_image_with_lines": {"type": "bool", "default": False}
             },
             "Pre-processing": {
-                "grayscale": {"type": "bool", "default": True},
                 "blur_ksize": {"type": "int", "default": 5, "min": 1, "max": 21, "step": 2},
                 "blur_sigma": {"type": "double", "default": 1.5, "min": 0.1, "max": 5.0},
                 "downscale": {"type": "double", "default": 1.0, "min": 0.1, "max": 2.0},
