@@ -151,7 +151,8 @@ class LineDetectorParameterGUI:
         self.parameter_definitions = {
             "I/O Settings": {
                 "image_topic": {"type": "string", "default": "image"},
-                "publish_image_with_lines": {"type": "bool", "default": False}
+                "publish_image_with_lines": {"type": "bool", "default": False},
+                "show_edges": {"type": "bool", "default": False}
             },
             "Pre-processing": {
                 "blur_ksize": {"type": "int", "default": 5, "min": 1, "max": 21, "step": 2},

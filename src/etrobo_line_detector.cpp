@@ -44,6 +44,7 @@ class LineDetectorNode : public rclcpp::Node {
 
     publish_image_ =
         this->declare_parameter<bool>("publish_image_with_lines", false);
+    show_edges_ = this->declare_parameter<bool>("show_edges", false);
 
     use_hsv_mask_ = this->declare_parameter<bool>("use_hsv_mask", true);
     blur_ksize_ = this->declare_parameter<int>("blur_ksize", 5);
@@ -208,14 +209,16 @@ class LineDetectorNode : public rclcpp::Node {
       } else {
         cv::cvtColor(work, hsv_src, cv::COLOR_BGR2HSV);
       }
-      const cv::Scalar lower(0, 0, 0);
-      const cv::Scalar upper(180, 120, 150);  // wider S/V to keep near-black
+      const cv::Scalar lower(hsv_lower_h_, hsv_lower_s_, hsv_lower_v_);
+      const cv::Scalar upper(hsv_upper_h_, hsv_upper_s_, hsv_upper_v_);
       cv::Mat mask;
       cv::inRange(hsv_src, lower, upper, mask);
       // Thicken mask slightly so boundary edges survive masking
-      cv::Mat kernel =
-          cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
-      cv::dilate(mask, mask, kernel, cv::Point(-1, -1), 1);
+      if (hsv_dilate_iter_ > 0) {
+        cv::Mat kernel = cv::getStructuringElement(
+            cv::MORPH_RECT, cv::Size(hsv_dilate_kernel_, hsv_dilate_kernel_));
+        cv::dilate(mask, mask, kernel, cv::Point(-1, -1), hsv_dilate_iter_);
+      }
       cv::bitwise_and(edges, mask, edges);
     }
 
@@ -256,25 +259,46 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   void publish_visualization(const std::vector<cv::Vec4i> &segments,
-                             const cv::Mat &original_img,
+                             const cv::Mat &original_img, const cv::Mat &edges,
+                             const cv::Rect &roi_rect,
                              const std_msgs::msg::Header &header) {
     if (!image_pub_) return;
 
     cv::Mat vis;
-    if (original_img.channels() == 1) {
-      cv::cvtColor(original_img, vis, cv::COLOR_GRAY2BGR);
+
+    // If show_edges is enabled, display edge image instead of original
+    if (show_edges_) {
+      // Scale up edges to original image size
+      cv::Mat edges_full;
+      cv::resize(edges, edges_full, cv::Size(roi_rect.width, roi_rect.height),
+                 0, 0, cv::INTER_NEAREST);
+
+      // Create full-size edge image
+      cv::Mat edges_original =
+          cv::Mat::zeros(original_img.rows, original_img.cols, CV_8UC1);
+      edges_full.copyTo(edges_original(roi_rect));
+
+      // Convert to BGR for visualization
+      cv::cvtColor(edges_original, vis, cv::COLOR_GRAY2BGR);
     } else {
-      vis = original_img.clone();
+      // Use original image
+      if (original_img.channels() == 1) {
+        cv::cvtColor(original_img, vis, cv::COLOR_GRAY2BGR);
+      } else {
+        vis = original_img.clone();
+      }
     }
 
-    // Draw line segments with BGR color
-    cv::Scalar line_color(static_cast<int>(draw_color_bgr_[0]),
-                          static_cast<int>(draw_color_bgr_[1]),
-                          static_cast<int>(draw_color_bgr_[2]));
+    // Draw line segments with BGR color (only when not showing edges)
+    if (!show_edges_) {
+      cv::Scalar line_color(static_cast<int>(draw_color_bgr_[0]),
+                            static_cast<int>(draw_color_bgr_[1]),
+                            static_cast<int>(draw_color_bgr_[2]));
 
-    for (const auto &l : segments) {
-      cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), line_color,
-               draw_thickness_);
+      for (const auto &l : segments) {
+        cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), line_color,
+                 draw_thickness_);
+      }
     }
 
     // Calibration overlay: draw detected gray ellipse/circle and line from
@@ -544,7 +568,8 @@ class LineDetectorNode : public rclcpp::Node {
           result.successful = false;
           result.reason =
               "Changing publish_image_with_lines at runtime is not supported";
-        }
+        } else if (name == "show_edges")
+          show_edges_ = p.as_bool();
         // HSV mask params
         else if (name == "hsv_lower_h")
           hsv_lower_h_ = p.as_int();
@@ -718,7 +743,7 @@ class LineDetectorNode : public rclcpp::Node {
 
     // Step 6: Publish results
     std_msgs::msg::Header header = msg->header;
-    publish_visualization(segments_out, img, header);
+    publish_visualization(segments_out, img, edges, roi_rect, header);
     if (state_ == State::Ready) {
       publish_lines_data(segments_out);
     }
@@ -1051,6 +1076,7 @@ class LineDetectorNode : public rclcpp::Node {
   std::string image_topic_;
   std::string camera_info_topic_;
   bool publish_image_{};
+  bool show_edges_{};
   bool use_hsv_mask_{};
   int blur_ksize_{};
   double blur_sigma_{};
