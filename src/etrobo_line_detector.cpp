@@ -71,7 +71,6 @@ class LineDetectorNode : public rclcpp::Node {
     draw_color_bgr_ = this->declare_parameter<std::vector<int64_t>>(
         "draw_color_bgr", std::vector<int64_t>{0, 255, 0});
     draw_thickness_ = this->declare_parameter<int>("draw_thickness", 2);
-    publish_markers_ = this->declare_parameter<bool>("publish_markers", true);
 
     // HSV mask parameters
     hsv_lower_h_ = this->declare_parameter<int>("hsv_lower_h", 0);
@@ -113,11 +112,6 @@ class LineDetectorNode : public rclcpp::Node {
     }
     lines_pub_ =
         this->create_publisher<std_msgs::msg::Float32MultiArray>("lines", 10);
-    if (publish_markers_) {
-      markers_pub_ =
-          this->create_publisher<visualization_msgs::msg::MarkerArray>(
-              "markers", 10);
-    }
   }
 
   void setup_subscription() {
@@ -549,8 +543,7 @@ class LineDetectorNode : public rclcpp::Node {
           draw_color_bgr_.assign(v.begin(), v.end());
         } else if (name == "draw_thickness")
           draw_thickness_ = p.as_int();
-        else if (name == "publish_markers")
-          publish_markers_ = p.as_bool();
+
         else if (name == "publish_image_with_lines") {
           // Requires (re)creating publisher. Not supported at runtime.
           result.successful = false;
@@ -667,39 +660,6 @@ class LineDetectorNode : public rclcpp::Node {
     return segments;
   }
 
-  void publish_markers(const std::vector<cv::Vec4i> &lines,
-                       const std_msgs::msg::Header &header) {
-    if (!publish_markers_ || !markers_pub_) return;
-    visualization_msgs::msg::MarkerArray array;
-    visualization_msgs::msg::Marker m;
-    m.header = header;
-    m.ns = "lines";
-    m.type = visualization_msgs::msg::Marker::LINE_LIST;
-    m.action = visualization_msgs::msg::Marker::ADD;
-    m.scale.x = std::max(0.001, static_cast<double>(draw_thickness_));
-    m.color.a = 1.0;
-    m.color.b = static_cast<double>(draw_color_bgr_[0]) / 255.0;
-    m.color.g = static_cast<double>(draw_color_bgr_[1]) / 255.0;
-    m.color.r = static_cast<double>(draw_color_bgr_[2]) / 255.0;
-    m.id = 0;
-    m.pose.orientation.w = 1.0;
-
-    m.points.reserve(lines.size() * 2);
-    for (const auto &l : lines) {
-      geometry_msgs::msg::Point p1, p2;
-      p1.x = l[0];
-      p1.y = l[1];
-      p1.z = 0.0;
-      p2.x = l[2];
-      p2.y = l[3];
-      p2.z = 0.0;
-      m.points.push_back(p1);
-      m.points.push_back(p2);
-    }
-    array.markers.push_back(m);
-    markers_pub_->publish(array);
-  }
-
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
     const auto t0 = std::chrono::steady_clock::now();
 
@@ -734,7 +694,6 @@ class LineDetectorNode : public rclcpp::Node {
     if (state_ == State::Ready) {
       publish_lines_data(segments_out);
     }
-    publish_markers(segments_out, header);
 
     // Calibration mode processing (detect gray circle and estimate pitch)
     if (state_ == State::CalibratePitch) {
@@ -1079,7 +1038,6 @@ class LineDetectorNode : public rclcpp::Node {
   double max_theta_deg_{};
   std::vector<int64_t> draw_color_bgr_{};
   int draw_thickness_{};
-  bool publish_markers_{};
 
   // HSV mask parameters
   int hsv_lower_h_{};
@@ -1134,9 +1092,8 @@ class LineDetectorNode : public rclcpp::Node {
       camera_info_sub_;
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
   rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr lines_pub_;
-  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
-      markers_pub_;
-  OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+      param_cb_handle_;
 
   std::mutex param_mutex_;
 };

@@ -7,7 +7,7 @@ A ROS 2 C++ node that detects straight lines using Canny + Hough transform and p
 - **Startup Calibration**: Estimates camera pitch using a known landmark distance, then switches to normal publishing
 - **Low Latency**: Never drops the frame being processed; subscription queue keeps only the latest frame (QoS depth = 1)
 - **Flexible Parameters**: Dynamically tune Canny/Hough, pre-processing, and visualization parameters
-- **Multiple Outputs**: Publishes detection results as arrays, visualization images, and RViz markers
+- **Multiple Outputs**: Publishes detection results as arrays and visualization images
 - **Parameter GUI**: Interactive Python GUI for real-time parameter adjustment with live image feed
 - **Timing Logs**: Outputs per-frame processing time using `steady_clock` at INFO level
 
@@ -96,16 +96,16 @@ The GUI provides:
 - **Output**:
   - `/image_with_lines` (`sensor_msgs/msg/Image`) — visualization with detected lines overlaid
   - `/lines` (`std_msgs/msg/Float32MultiArray`) — line segments as flat `[x1, y1, x2, y2, ...]` array  
-  - `/markers` (`visualization_msgs/msg/MarkerArray`) — RViz visualization markers
+
 
 ## Parameters (excerpt)
-- **I/O**: `image_topic`, `use_color_output`, `publish_image_with_lines`
+- **I/O**: `image_topic`, `publish_image_with_lines`, `show_edges`
 - **Calibration**: `camera_info_topic` (string), `camera_height_meters` (double; default 0.2), `landmark_distance_meters` (double; default 0.59), `calib_timeout_sec` (double; default 60.0; set 0 to disable timeout and keep calibrating continuously), `calib_roi` (int[4]; default [200,150,240,180]), HSV thresholds (`calib_hsv_s_max`=16, `calib_hsv_v_min`=100, `calib_hsv_v_max`=168)
-- **Pre-processing**: `grayscale`, `blur_ksize`, `blur_sigma`, `roi`, `downscale`
+- **Pre-processing**: `blur_ksize`, `blur_sigma`, `roi`
 - **Canny Edge**: `canny_low`, `canny_high`, `canny_aperture`, `canny_L2gradient`
 - **Hough Transform**: `hough_type`, `rho`, `theta_deg`, `threshold`, `min_line_length`, `max_line_gap`
 - **HSV Mask**: `use_hsv_mask`, `hsv_lower_*`, `hsv_upper_*`, morphology parameters
-- **Visualization**: `draw_color_bgr`, `draw_thickness`, `publish_markers`
+- **Visualization**: `draw_color_bgr`, `draw_thickness`
 
 See [doc/DESIGN.md](doc/DESIGN.md) for complete parameter documentation.
 

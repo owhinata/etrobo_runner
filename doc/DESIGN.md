@@ -37,7 +37,7 @@
 - Output
   - `~image_with_lines` (`sensor_msgs/msg/Image`): debug image with detected lines overlaid (BGR8)
   - `~lines` (`std_msgs/msg/Float32MultiArray`): detected line segments, each as `[x1, y1, x2, y2]` in a flat array
-  - `~markers` (`visualization_msgs/msg/MarkerArray`): optional RViz markers for lines (controlled by a parameter)
+
 
 ## QoS and Latency Optimization
 - Subscription QoS: `rclcpp::SensorDataQoS().keep_last(1).best_effort().durability_volatile()`
@@ -66,7 +66,7 @@
   - standard: `min_theta_deg` (double; `0`), `max_theta_deg` (double; `180`)
 - Visualization
   - `draw_color_bgr` (int[3]; default: `[0, 255, 0]`), `draw_thickness` (int; default: `2`)
-  - `publish_markers` (bool; default: `true`)
+
   - During calibration: displays HSV mask (160x120px) in top-right corner with semi-transparent background
 
 ## HSV Mask (optional)
@@ -90,7 +90,7 @@
    - `probabilistic`: use `cv::HoughLinesP` to obtain segments (x1, y1, x2, y2)
    - `standard`: use `cv::HoughLines` to obtain (rho, theta), then extend to image borders to form segments
 6. Restore ROI coordinates to the original scale.
-7. Draw overlays → publish `image_with_lines`, and publish `lines` and `markers`.
+7. Draw overlays → publish `image_with_lines` and `lines`.
 
 ### Calibration math (summary)
 - Let `v` be the median image row of the gray circle center (pixels), `fy, cy` from camera intrinsics, `u = (v - cy)/fy`.

@@ -209,7 +209,7 @@ class LineDetectorParameterGUI:
             },
             "Visualization": {
                 "draw_thickness": {"type": "int", "default": 2, "min": 1, "max": 10},
-                "publish_markers": {"type": "bool", "default": True}
+
             }
         }
 
