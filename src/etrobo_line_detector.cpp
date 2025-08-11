@@ -51,7 +51,6 @@ class LineDetectorNode : public rclcpp::Node {
     blur_sigma_ = this->declare_parameter<double>("blur_sigma", 1.5);
     roi_ = this->declare_parameter<std::vector<int64_t>>(
         "roi", std::vector<int64_t>{-1, -1, -1, -1});
-    downscale_ = this->declare_parameter<double>("downscale", 1.0);
 
     canny_low_ = this->declare_parameter<int>("canny_low", 40);
     canny_high_ = this->declare_parameter<int>("canny_high", 120);
@@ -144,7 +143,7 @@ class LineDetectorNode : public rclcpp::Node {
 
   cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
                            cv::Mat &original_img, cv::Mat &work_img,
-                           cv::Rect &roi_rect, double &scale) {
+                           cv::Rect &roi_rect) {
     // Convert to cv::Mat
     cv_bridge::CvImageConstPtr cv_ptr;
     try {
@@ -163,20 +162,10 @@ class LineDetectorNode : public rclcpp::Node {
     cv::Mat img = cv_ptr->image;
     original_img = img;
 
-    // ROI + Downscale
+    // ROI (no downscaling)
     roi_rect = valid_roi(img, roi_);
     cv::Mat work = img(roi_rect).clone();
-
-    scale = 1.0;
-    if (downscale_ != 1.0) {
-      scale = std::max(1e-6, downscale_);
-      cv::Mat tmp;
-      cv::resize(work, tmp, cv::Size(), 1.0 / scale, 1.0 / scale,
-                 cv::INTER_AREA);
-      work = tmp;
-    }
-
-    work_img = work;  // save downscaled work image
+    work_img = work;  // save work image
 
     // Convert to grayscale for Canny edge detection
     cv::Mat gray;
@@ -244,15 +233,15 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   std::vector<cv::Vec4i> restore_coordinates(
-      const std::vector<cv::Vec4i> &segments, const cv::Rect &roi_rect,
-      double scale) {
+      const std::vector<cv::Vec4i> &segments, const cv::Rect &roi_rect) {
     std::vector<cv::Vec4i> segments_full;
     segments_full.reserve(segments.size());
     for (const auto &l : segments) {
-      int x1 = static_cast<int>(std::round(l[0] * scale)) + roi_rect.x;
-      int y1 = static_cast<int>(std::round(l[1] * scale)) + roi_rect.y;
-      int x2 = static_cast<int>(std::round(l[2] * scale)) + roi_rect.x;
-      int y2 = static_cast<int>(std::round(l[3] * scale)) + roi_rect.y;
+      // Direct coordinate translation (no scaling needed)
+      int x1 = l[0] + roi_rect.x;
+      int y1 = l[1] + roi_rect.y;
+      int x2 = l[2] + roi_rect.x;
+      int y2 = l[3] + roi_rect.y;
       segments_full.emplace_back(cv::Vec4i{x1, y1, x2, y2});
     }
     return segments_full;
@@ -468,7 +457,7 @@ class LineDetectorNode : public rclcpp::Node {
   void sanitize_parameters() {
     if (blur_ksize_ <= 0) blur_ksize_ = 1;
     if (blur_ksize_ % 2 == 0) blur_ksize_ += 1;  // must be odd
-    if (downscale_ <= 0.0) downscale_ = 1.0;
+
     if (canny_low_ < 0) canny_low_ = 0;
     if (canny_high_ < 0) canny_high_ = 0;
     if (canny_aperture_ != 3 && canny_aperture_ != 5 && canny_aperture_ != 7) {
@@ -530,8 +519,7 @@ class LineDetectorNode : public rclcpp::Node {
           blur_sigma_ = p.as_double();
         else if (name == "roi")
           roi_ = p.as_integer_array();
-        else if (name == "downscale")
-          downscale_ = p.as_double();
+
         else if (name == "canny_low")
           canny_low_ = p.as_int();
         else if (name == "canny_high")
@@ -724,8 +712,7 @@ class LineDetectorNode : public rclcpp::Node {
     // Step 1: Preprocess image
     cv::Mat img, work;
     cv::Rect roi_rect;
-    double scale;
-    cv::Mat gray = preprocess_image(msg, img, work, roi_rect, scale);
+    cv::Mat gray = preprocess_image(msg, img, work, roi_rect);
     if (gray.empty()) return;
 
     // Step 2: Detect edges
@@ -734,9 +721,9 @@ class LineDetectorNode : public rclcpp::Node {
     // Step 3: Detect lines
     std::vector<cv::Vec4i> segments = detect_lines(edges);
 
-    // Step 4: Restore coordinates to original scale and ROI
+    // Step 4: Restore coordinates to original ROI
     std::vector<cv::Vec4i> segments_full =
-        restore_coordinates(segments, roi_rect, scale);
+        restore_coordinates(segments, roi_rect);
 
     // Step 5: Use segments directly without temporal smoothing
     std::vector<cv::Vec4i> segments_out = segments_full;
@@ -763,16 +750,12 @@ class LineDetectorNode : public rclcpp::Node {
           calib_roi_[3] <= 0) {
         inter_full = roi_rect;
       }
-      // Map inter_full to 'work' coordinates
+      // Map inter_full to 'work' coordinates (no scaling needed)
       cv::Rect inter_work;
-      inter_work.x = static_cast<int>(
-          std::floor((inter_full.x - roi_rect.x) / std::max(1e-6, scale)));
-      inter_work.y = static_cast<int>(
-          std::floor((inter_full.y - roi_rect.y) / std::max(1e-6, scale)));
-      inter_work.width =
-          static_cast<int>(std::ceil(inter_full.width / std::max(1e-6, scale)));
-      inter_work.height = static_cast<int>(
-          std::ceil(inter_full.height / std::max(1e-6, scale)));
+      inter_work.x = inter_full.x - roi_rect.x;
+      inter_work.y = inter_full.y - roi_rect.y;
+      inter_work.width = inter_full.width;
+      inter_work.height = inter_full.height;
       inter_work &= cv::Rect(0, 0, work.cols, work.rows);
 
       cv::Mat work_sub = work;
@@ -782,7 +765,7 @@ class LineDetectorNode : public rclcpp::Node {
         roi_full_for_mapping = inter_full;
       }
 
-      if (detect_landmark_center(work_sub, roi_full_for_mapping, scale, x_full,
+      if (detect_landmark_center(work_sub, roi_full_for_mapping, 1.0, x_full,
                                  v_full)) {
         last_circle_px_ = cv::Point2d(x_full, v_full);
         last_circle_valid_ = true;
@@ -1081,7 +1064,7 @@ class LineDetectorNode : public rclcpp::Node {
   int blur_ksize_{};
   double blur_sigma_{};
   std::vector<int64_t> roi_{};  // x,y,w,h (-1 = disabled)
-  double downscale_{};
+
   int canny_low_{};
   int canny_high_{};
   int canny_aperture_{};

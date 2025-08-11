@@ -54,7 +54,7 @@
   - `blur_ksize` (int; default: `5`) odd values only
   - `blur_sigma` (double; default: `1.5`)
   - `roi` (int[4]; default: `[-1, -1, -1, -1]`) `[x, y, w, h]` (disabled when -1)
-  - `downscale` (double; default: `1.0`) `> 0`; 1.0 disables downscaling
+
 - Canny
   - `canny_low` (int; default: `40`), `canny_high` (int; default: `120`)
   - `canny_aperture` (int; default: `3`) allowed: 3, 5, 7
@@ -82,14 +82,14 @@
 
 ## Processing Flow
 1. Convert the received image to `cv::Mat` via `cv_bridge`.
-2. Apply ROI cropping → downscale (`downscale`).
+2. Apply ROI cropping.
 3. Convert to grayscale if needed → apply GaussianBlur.
 4. Run Canny edge detection.
    - If enabled, apply HSV mask to the Canny edges.
 5. Run Hough transform
    - `probabilistic`: use `cv::HoughLinesP` to obtain segments (x1, y1, x2, y2)
    - `standard`: use `cv::HoughLines` to obtain (rho, theta), then extend to image borders to form segments
-6. Invert ROI/downscale to restore coordinates to the original scale.
+6. Restore ROI coordinates to the original scale.
 7. Draw overlays → publish `image_with_lines`, and publish `lines` and `markers`.
 
 ### Calibration math (summary)
@@ -112,7 +112,7 @@
 ## Error Handling
 - Invalid ROI is disabled with a WARN log.
 - Unsupported encodings are converted to BGR/mono if possible; otherwise log WARN and skip the frame.
-- Coerce `downscale <= 0` to `1.0`.
+
 - Reject out-of-range parameters for Canny/Hough at update time.
 
 ## Dependencies
