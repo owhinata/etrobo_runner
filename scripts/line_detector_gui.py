@@ -192,19 +192,6 @@ class LineDetectorParameterGUI:
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
                 "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
             },
-            "Edge Closing": {
-                "use_edge_close": {"type": "bool", "default": True},
-                "edge_close_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
-                "edge_close_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
-            },
-            "Temporal Smoothing": {
-                "enable_temporal_smoothing": {"type": "bool", "default": True},
-                "ema_alpha": {"type": "double", "default": 0.5, "min": 0.0, "max": 1.0},
-                "match_max_px": {"type": "int", "default": 20, "min": 1, "max": 100},
-                "match_max_angle_deg": {"type": "double", "default": 10.0, "min": 0.0, "max": 180.0},
-                "min_age_to_publish": {"type": "int", "default": 2, "min": 0, "max": 10},
-                "max_missed": {"type": "int", "default": 3, "min": 0, "max": 10}
-            },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
                 "landmark_distance_meters": {"type": "double", "default": 0.59, "min": 0.1, "max": 2.0},
