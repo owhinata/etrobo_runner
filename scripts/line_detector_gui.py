@@ -168,17 +168,6 @@ class LineDetectorParameterGUI:
                 "canny_aperture": {"type": "choice", "default": 3, "choices": [3, 5, 7]},
                 "canny_L2gradient": {"type": "bool", "default": False}
             },
-            "Hough Transform": {
-                "hough_type": {"type": "choice", "default": "probabilistic",
-                               "choices": ["probabilistic", "standard"]},
-                "rho": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
-                "theta_deg": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
-                "threshold": {"type": "int", "default": 50, "min": 1, "max": 200},
-                "min_line_length": {"type": "double", "default": 30.0, "min": 1.0, "max": 200.0},
-                "max_line_gap": {"type": "double", "default": 10.0, "min": 1.0, "max": 100.0},
-                "min_theta_deg": {"type": "double", "default": 0.0, "min": 0.0, "max": 180.0},
-                "max_theta_deg": {"type": "double", "default": 180.0, "min": 0.0, "max": 180.0}
-            },
             "HSV Mask": {
                 "use_hsv_mask": {"type": "bool", "default": True},
                 "hsv_lower_h": {"type": "int", "default": 0, "min": 0, "max": 180},
@@ -189,6 +178,17 @@ class LineDetectorParameterGUI:
                 "hsv_upper_v": {"type": "int", "default": 150, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
                 "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
+            },
+            "Hough Transform": {
+                "hough_type": {"type": "choice", "default": "probabilistic",
+                               "choices": ["probabilistic", "standard"]},
+                "rho": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
+                "theta_deg": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
+                "threshold": {"type": "int", "default": 50, "min": 1, "max": 200},
+                "min_line_length": {"type": "double", "default": 30.0, "min": 1.0, "max": 200.0},
+                "max_line_gap": {"type": "double", "default": 10.0, "min": 1.0, "max": 100.0},
+                "min_theta_deg": {"type": "double", "default": 0.0, "min": 0.0, "max": 180.0},
+                "max_theta_deg": {"type": "double", "default": 180.0, "min": 0.0, "max": 180.0}
             },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
