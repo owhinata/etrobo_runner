@@ -48,9 +48,9 @@
 ## Parameters
 - I/O
   - `image_topic` (string; default: `image`): subscription topic name (also remappable)
-  - `use_color_output` (bool; default: `true`): publish output image as BGR8
+  - `publish_image_with_lines` (bool; default: `false`): enable image output publisher
+  - `show_edges` (bool; default: `false`): display edge image instead of original for debugging
 - Pre-processing
-  - `grayscale` (bool; default: `true`)
   - `blur_ksize` (int; default: `5`) odd values only
   - `blur_sigma` (double; default: `1.5`)
   - `roi` (int[4]; default: `[-1, -1, -1, -1]`) `[x, y, w, h]` (disabled when -1)
@@ -67,19 +67,16 @@
 - Visualization
   - `draw_color_bgr` (int[3]; default: `[0, 255, 0]`), `draw_thickness` (int; default: `2`)
   - `publish_markers` (bool; default: `true`)
-  - `publish_image_with_lines` (bool; default: `false`): publish the overlay image.
-    When `false`, the node does not create the image publisher and skips all
-    visualization rendering to reduce CPU load.
   - During calibration: displays HSV mask (160x120px) in top-right corner with semi-transparent background
 
 ## HSV Mask (optional)
 - `use_hsv_mask` (bool; default: `true`): enable HSV masking after Canny to isolate the black center line.
 - Thresholds:
   - `hsv_lower_h` (int; default: `0`), `hsv_lower_s` (int; default: `0`), `hsv_lower_v` (int; default: `0`)
-  - `hsv_upper_h` (int; default: `180`), `hsv_upper_s` (int; default: `120`), `hsv_upper_v` (int; default: `150`)
+  - `hsv_upper_h` (int; default: `180`), `hsv_upper_s` (int; default: `40`), `hsv_upper_v` (int; default: `148`)
 - Morphology:
   - `hsv_dilate_kernel` (int; default: `3`): odd kernel size.
-  - `hsv_dilate_iter` (int; default: `1`): dilation iterations (0 to disable).
+  - `hsv_dilate_iter` (int; default: `2`): dilation iterations (0 to disable).
 
 
 

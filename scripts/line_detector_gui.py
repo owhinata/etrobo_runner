@@ -175,10 +175,10 @@ class LineDetectorParameterGUI:
                 "hsv_lower_s": {"type": "int", "default": 0, "min": 0, "max": 255},
                 "hsv_lower_v": {"type": "int", "default": 0, "min": 0, "max": 255},
                 "hsv_upper_h": {"type": "int", "default": 180, "min": 0, "max": 180},
-                "hsv_upper_s": {"type": "int", "default": 120, "min": 0, "max": 255},
-                "hsv_upper_v": {"type": "int", "default": 150, "min": 0, "max": 255},
+                "hsv_upper_s": {"type": "int", "default": 40, "min": 0, "max": 255},
+                "hsv_upper_v": {"type": "int", "default": 148, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
-                "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
+                "hsv_dilate_iter": {"type": "int", "default": 2, "min": 0, "max": 10}
             },
             "Hough Transform": {
                 "hough_type": {"type": "choice", "default": "probabilistic",

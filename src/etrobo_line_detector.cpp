@@ -79,10 +79,10 @@ class LineDetectorNode : public rclcpp::Node {
     hsv_lower_s_ = this->declare_parameter<int>("hsv_lower_s", 0);
     hsv_lower_v_ = this->declare_parameter<int>("hsv_lower_v", 0);
     hsv_upper_h_ = this->declare_parameter<int>("hsv_upper_h", 180);
-    hsv_upper_s_ = this->declare_parameter<int>("hsv_upper_s", 120);
-    hsv_upper_v_ = this->declare_parameter<int>("hsv_upper_v", 150);
+    hsv_upper_s_ = this->declare_parameter<int>("hsv_upper_s", 40);
+    hsv_upper_v_ = this->declare_parameter<int>("hsv_upper_v", 148);
     hsv_dilate_kernel_ = this->declare_parameter<int>("hsv_dilate_kernel", 3);
-    hsv_dilate_iter_ = this->declare_parameter<int>("hsv_dilate_iter", 1);
+    hsv_dilate_iter_ = this->declare_parameter<int>("hsv_dilate_iter", 2);
 
     // Calibration parameters
     camera_height_m_ =
