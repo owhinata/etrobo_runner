@@ -8,8 +8,8 @@
 
 ## Startup Calibration
 - States:
-  - `CalibratePitch` (initial): enable temporal smoothing; do not publish `~lines`; estimate camera pitch from a gray circle at a known ground distance using `~camera_info` intrinsics.
-  - `Ready`: disable temporal smoothing; publish `~lines` and `~markers` normally.
+  - `CalibratePitch` (initial): do not publish `~lines`; estimate camera pitch from a gray circle at a known ground distance using `~camera_info` intrinsics.
+  - `Ready`: publish `~lines` and `~markers` normally.
 - Parameters:
   - `camera_info_topic` (string; default: `camera_info`)
   - `camera_height_meters` (double; default: `0.2`)
@@ -81,29 +81,15 @@
   - `hsv_dilate_kernel` (int; default: `3`): odd kernel size.
   - `hsv_dilate_iter` (int; default: `1`): dilation iterations (0 to disable).
 
-## Edge Closing (optional)
-- `use_edge_close` (bool; default: `true`): apply morphological closing on edges to reduce fragmentation.
-- `edge_close_kernel` (int; default: `3`): odd kernel size for rectangular structuring element.
-- `edge_close_iter` (int; default: `1`): number of closing iterations (0 to disable).
 
-## Temporal Smoothing (optional)
-- `enable_temporal_smoothing` (bool; default: `true`): publish temporally smoothed line segments.
-- `ema_alpha` (double; default: `0.5`): EMA factor for endpoints; closer to 1.0 trusts the current frame more.
-- `match_max_px` (int; default: `20`): maximum sum of endpoint distances (with best endpoint pairing) to consider a match.
-- `match_max_angle_deg` (double; default: `10.0`): maximum angle difference between track and detection.
-- `min_age_to_publish` (int; default: `2`): minimum matched frames before a track is published.
-- `max_missed` (int; default: `3`): maximum consecutive frames a track can miss before removal.
-
-Algorithm: per frame, greedily match detections to existing tracks using endpoint distance and angle thresholds. Update matched tracks via EMA on endpoints; create new tracks for unmatched detections; age and prune stale tracks. Publish tracks whose age ≥ `min_age_to_publish` (fallback to raw detections if no stable tracks exist in a frame).
 
 ## Processing Flow
 1. Convert the received image to `cv::Mat` via `cv_bridge`.
 2. Apply ROI cropping → downscale (`downscale`).
 3. Convert to grayscale if needed → apply GaussianBlur.
 4. Run Canny edge detection.
-   - If enabled, apply HSV mask to the Canny edges, then optional edge closing (morphological close) before Hough.
+   - If enabled, apply HSV mask to the Canny edges.
 5. Run Hough transform
-6. If temporal smoothing is enabled, match detections to existing tracks and publish smoothed segments (otherwise publish raw detections).
    - `probabilistic`: use `cv::HoughLinesP` to obtain segments (x1, y1, x2, y2)
    - `standard`: use `cv::HoughLines` to obtain (rho, theta), then extend to image borders to form segments
 6. Invert ROI/downscale to restore coordinates to the original scale.

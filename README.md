@@ -3,7 +3,7 @@
 A ROS 2 C++ node that detects straight lines using Canny + Hough transform and publishes both the detection results and a visualization image. Includes a Python GUI tool for real-time parameter tuning.
 
 ## Features
-- **Line Detection**: Canny edge detection + Hough transform with temporal smoothing
+- **Line Detection**: Canny edge detection + Hough transform
 - **Startup Calibration**: Estimates camera pitch using a known landmark distance, then switches to normal publishing
 - **Low Latency**: Never drops the frame being processed; subscription queue keeps only the latest frame (QoS depth = 1)
 - **Flexible Parameters**: Dynamically tune Canny/Hough, pre-processing, and visualization parameters
@@ -105,31 +105,27 @@ The GUI provides:
 - **Canny Edge**: `canny_low`, `canny_high`, `canny_aperture`, `canny_L2gradient`
 - **Hough Transform**: `hough_type`, `rho`, `theta_deg`, `threshold`, `min_line_length`, `max_line_gap`
 - **HSV Mask**: `use_hsv_mask`, `hsv_lower_*`, `hsv_upper_*`, morphology parameters
-- **Edge Closing**: `use_edge_close`, `edge_close_kernel`, `edge_close_iter`
-- **Temporal Smoothing**: `enable_temporal_smoothing`, `ema_alpha`, tracking parameters
 - **Visualization**: `draw_color_bgr`, `draw_thickness`, `publish_markers`
 
 See [doc/DESIGN.md](doc/DESIGN.md) for complete parameter documentation.
 
 ## Startup Calibration
 - On startup the node enters CalibratePitch state:
-  - Enables temporal smoothing, does not publish the `lines` topic.
+  - Does not publish the `lines` topic.
   - Detects the gray start-circle and collects several detections.
   - Computes camera pitch using camera intrinsics, known camera height, and known landmark distance.
-  - Transitions to Ready, disables temporal smoothing, and starts publishing `lines`.
+  - Transitions to Ready and starts publishing `lines`.
   - If calibration times out (`calib_timeout_sec`), the node proceeds with a 0 rad pitch.
 
 ## GUI Parameter Categories
-The Python GUI organizes parameters into 9 intuitive sections:
+The Python GUI organizes parameters into 7 intuitive sections:
 1. **I/O Settings** — Input/output configuration
 2. **Pre-processing** — Image preparation (ROI, blur, scaling)
 3. **Canny Edge** — Edge detection parameters
 4. **Hough Transform** — Line detection settings
 5. **HSV Mask** — Color-based filtering for black lines
-6. **Edge Closing** — Morphological edge enhancement
-7. **Temporal Smoothing** — Multi-frame line tracking
-8. **Calibration** — Camera pitch estimation and gray disk detection settings
-9. **Visualization** — Drawing and output options
+6. **Calibration** — Camera pitch estimation and gray disk detection settings
+7. **Visualization** — Drawing and output options
 
 ## License
 This project follows the repository’s license policy.
