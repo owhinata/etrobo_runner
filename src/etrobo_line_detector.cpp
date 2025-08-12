@@ -102,8 +102,6 @@ class LineDetectorNode : public rclcpp::Node {
     calib_fill_min_ = this->declare_parameter<double>("calib_fill_min", 0.25);
 
     // Localization parameters
-    enable_localization_ =
-        this->declare_parameter<bool>("enable_localization", true);
     landmark_map_x_ = this->declare_parameter<double>("landmark_map_x", -0.409);
     landmark_map_y_ = this->declare_parameter<double>("landmark_map_y", 1.0);
   }
@@ -651,8 +649,6 @@ class LineDetectorNode : public rclcpp::Node {
         else if (name == "calib_fill_min")
           calib_fill_min_ = p.as_double();
         // Localization params
-        else if (name == "enable_localization")
-          enable_localization_ = p.as_bool();
         else if (name == "landmark_map_x")
           landmark_map_x_ = p.as_double();
         else if (name == "landmark_map_y")
@@ -749,7 +745,7 @@ class LineDetectorNode : public rclcpp::Node {
     // Step 6: Publish results
     std_msgs::msg::Header header = msg->header;
     publish_visualization(segments_out, img, edges, roi_rect, header);
-    if (state_ == State::Ready || state_ == State::Localize) {
+    if (state_ == State::Localize) {
       publish_lines_data(segments_out);
     }
 
@@ -761,10 +757,8 @@ class LineDetectorNode : public rclcpp::Node {
       static int frame_count = 0;
       frame_count++;
       if (frame_count % 100 == 0) {
-        const char *state_str = (state_ == State::CalibratePitch)
-                                    ? "CalibratePitch"
-                                : (state_ == State::Ready) ? "Ready"
-                                                           : "Unknown";
+        const char *state_str =
+            (state_ == State::CalibratePitch) ? "CalibratePitch" : "Unknown";
         RCLCPP_INFO(this->get_logger(),
                     "Current state: %s (not in Localize mode)", state_str);
       }
@@ -829,7 +823,7 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   // ===== Calibration: camera pitch estimation =====
-  enum class State { CalibratePitch, Ready, Localize };
+  enum class State { CalibratePitch, Localize };
 
   void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
     if (msg->k.size() >= 9) {
@@ -1090,22 +1084,11 @@ class LineDetectorNode : public rclcpp::Node {
   void transition_to_ready(double pitch_rad) {
     estimated_pitch_rad_ = pitch_rad;
 
+    state_ = State::Localize;
     RCLCPP_INFO(this->get_logger(),
-                "transition_to_ready: enable_localization_=%s",
-                enable_localization_ ? "true" : "false");
-
-    if (enable_localization_) {
-      state_ = State::Localize;
-      RCLCPP_INFO(this->get_logger(),
-                  "Calibration finished. Estimated pitch: %.2f deg (%.4f rad). "
-                  "Transitioning to localization mode.",
-                  rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
-    } else {
-      state_ = State::Ready;
-      RCLCPP_INFO(this->get_logger(),
-                  "Calibration finished. Estimated pitch: %.2f deg (%.4f rad)",
-                  rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
-    }
+                "Calibration finished. Estimated pitch: %.2f deg (%.4f rad). "
+                "Transitioning to localization mode.",
+                rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
   }
 
   // ===== Localization: robot pose estimation using landmarks =====
@@ -1330,7 +1313,6 @@ class LineDetectorNode : public rclcpp::Node {
   double calib_fill_min_{};
 
   // Localization parameters
-  bool enable_localization_{};
   double landmark_map_x_{};
   double landmark_map_y_{};
 

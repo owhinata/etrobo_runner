@@ -208,7 +208,6 @@ class LineDetectorParameterGUI:
                 "calib_roi_h": {"type": "int", "default": 180, "min": -1, "max": 1080}
             },
             "Localization": {
-                "enable_localization": {"type": "bool", "default": True},
                 "landmark_map_x": {"type": "double", "default": -0.409, "min": -5.0, "max": 5.0},
                 "landmark_map_y": {"type": "double", "default": 1.0, "min": -5.0, "max": 5.0}
             },
