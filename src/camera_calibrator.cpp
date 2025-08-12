@@ -38,13 +38,14 @@ CameraCalibrator::CameraCalibrator(LineDetectorNode* node) : node_(node) {
 
 void CameraCalibrator::declare_parameters() {
   // Calibration parameters
-  camera_height_m_ = node_->declare_parameter<double>("camera_height_m", 0.24);
+  camera_height_m_ =
+      node_->declare_parameter<double>("camera_height_meters", 0.2);
   landmark_distance_m_ =
-      node_->declare_parameter<double>("landmark_distance_m", 1.0);
+      node_->declare_parameter<double>("landmark_distance_meters", 0.59);
   calib_timeout_sec_ =
-      node_->declare_parameter<double>("calib_timeout_sec", 10.0);
+      node_->declare_parameter<double>("calib_timeout_sec", 60.0);
   calib_roi_ = node_->declare_parameter<std::vector<int64_t>>(
-      "calib_roi", std::vector<int64_t>{});
+      "calib_roi", std::vector<int64_t>{200, 150, 240, 180});
   calib_hsv_s_max_ = node_->declare_parameter<int>("calib_hsv_s_max", 16);
   calib_hsv_v_min_ = node_->declare_parameter<int>("calib_hsv_v_min", 100);
   calib_hsv_v_max_ = node_->declare_parameter<int>("calib_hsv_v_max", 168);
