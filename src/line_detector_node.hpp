@@ -110,19 +110,6 @@ class LineDetectorNode : public rclcpp::Node {
   std::vector<int64_t> draw_color_bgr_;
   int draw_thickness_;
 
-  // Calibration parameters
-  double camera_height_m_;
-  double landmark_distance_m_;
-  double calib_timeout_sec_;
-  std::vector<int64_t> calib_roi_;
-  int calib_hsv_s_max_;
-  int calib_hsv_v_min_;
-  int calib_hsv_v_max_;
-  int calib_min_area_;
-  int calib_min_major_px_;
-  double calib_max_major_ratio_;
-  double calib_fill_min_;
-
   // Localization parameters
   double landmark_map_x_;
   double landmark_map_y_;

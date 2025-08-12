@@ -26,24 +26,46 @@ CameraCalibrator::CameraCalibrator(LineDetectorNode* node) : node_(node) {
   last_angle_deg_ = 0.0;
   last_fill_ = 0.0;
 
-  // Cache parameters from node
-  camera_height_m_ = node_->camera_height_m_;
-  landmark_distance_m_ = node_->landmark_distance_m_;
-  calib_timeout_sec_ = node_->calib_timeout_sec_;
-  calib_roi_ = node_->calib_roi_;
-  calib_hsv_s_max_ = node_->calib_hsv_s_max_;
-  calib_hsv_v_min_ = node_->calib_hsv_v_min_;
-  calib_hsv_v_max_ = node_->calib_hsv_v_max_;
-  calib_min_area_ = node_->calib_min_area_;
-  calib_min_major_px_ = node_->calib_min_major_px_;
-  calib_max_major_ratio_ = node_->calib_max_major_ratio_;
-  calib_fill_min_ = node_->calib_fill_min_;
+  // Declare and initialize parameters
+  declare_parameters();
 
   // Start calibration timer if timeout is enabled
   if (calib_timeout_sec_ > 0.0) {
     calib_start_time_ = node_->now();
     calib_started_ = true;
   }
+}
+
+void CameraCalibrator::declare_parameters() {
+  // Calibration parameters
+  camera_height_m_ = node_->declare_parameter<double>("camera_height_m", 0.24);
+  landmark_distance_m_ =
+      node_->declare_parameter<double>("landmark_distance_m", 1.0);
+  calib_timeout_sec_ =
+      node_->declare_parameter<double>("calib_timeout_sec", 10.0);
+  calib_roi_ = node_->declare_parameter<std::vector<int64_t>>(
+      "calib_roi", std::vector<int64_t>{});
+  calib_hsv_s_max_ = node_->declare_parameter<int>("calib_hsv_s_max", 16);
+  calib_hsv_v_min_ = node_->declare_parameter<int>("calib_hsv_v_min", 100);
+  calib_hsv_v_max_ = node_->declare_parameter<int>("calib_hsv_v_max", 168);
+  calib_min_area_ = node_->declare_parameter<int>("calib_min_area", 80);
+  calib_min_major_px_ = node_->declare_parameter<int>("calib_min_major_px", 8);
+  calib_max_major_ratio_ =
+      node_->declare_parameter<double>("calib_max_major_ratio", 0.65);
+  calib_fill_min_ = node_->declare_parameter<double>("calib_fill_min", 0.25);
+
+  // Sanitize calibration parameters
+  camera_height_m_ = std::max(0.01, camera_height_m_);
+  landmark_distance_m_ = std::max(0.01, landmark_distance_m_);
+  calib_timeout_sec_ = std::max(0.0, calib_timeout_sec_);
+  calib_hsv_s_max_ = std::max(0, std::min(255, calib_hsv_s_max_));
+  calib_hsv_v_min_ = std::max(0, std::min(255, calib_hsv_v_min_));
+  calib_hsv_v_max_ =
+      std::max(calib_hsv_v_min_, std::min(255, calib_hsv_v_max_));
+  calib_min_area_ = std::max(1, calib_min_area_);
+  calib_min_major_px_ = std::max(1, calib_min_major_px_);
+  calib_max_major_ratio_ = std::max(0.1, std::min(1.0, calib_max_major_ratio_));
+  calib_fill_min_ = std::max(0.0, std::min(1.0, calib_fill_min_));
 }
 
 bool CameraCalibrator::process_frame(const cv::Mat& img) {

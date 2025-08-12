@@ -12,6 +12,9 @@ class CameraCalibrator {
  public:
   explicit CameraCalibrator(LineDetectorNode* node);
 
+  // Initialize and declare calibration parameters
+  void declare_parameters();
+
   // Main processing method
   bool process_frame(const cv::Mat& img);
 
@@ -31,6 +34,10 @@ class CameraCalibrator {
   double get_last_ratio() const { return last_ratio_; }
   double get_last_mean_s() const { return last_mean_s_; }
   double get_last_mean_v() const { return last_mean_v_; }
+
+  // Get calibration parameters
+  const std::vector<int64_t>& get_calib_roi() const { return calib_roi_; }
+  double get_camera_height() const { return camera_height_m_; }
 
   bool detect_landmark_center(const cv::Mat& work_img, const cv::Rect& roi,
                               double scale, double& x_full_out,
@@ -65,7 +72,7 @@ class CameraCalibrator {
   double last_fill_{};
   cv::Mat last_calib_hsv_mask_;
 
-  // Parameter cache (fetched from node)
+  // Calibration parameters (owned by this class)
   double camera_height_m_;
   double landmark_distance_m_;
   double calib_timeout_sec_;

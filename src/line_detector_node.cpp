@@ -83,23 +83,6 @@ void LineDetectorNode::declare_all_parameters() {
       "draw_color_bgr", {0, 255, 0});
   draw_thickness_ = this->declare_parameter<int>("draw_thickness", 2);
 
-  // Calibration parameters
-  camera_height_m_ = this->declare_parameter<double>("camera_height_m", 0.24);
-  landmark_distance_m_ =
-      this->declare_parameter<double>("landmark_distance_m", 1.0);
-  calib_timeout_sec_ =
-      this->declare_parameter<double>("calib_timeout_sec", 10.0);
-  calib_roi_ = this->declare_parameter<std::vector<int64_t>>(
-      "calib_roi", std::vector<int64_t>{});
-  calib_hsv_s_max_ = this->declare_parameter<int>("calib_hsv_s_max", 16);
-  calib_hsv_v_min_ = this->declare_parameter<int>("calib_hsv_v_min", 100);
-  calib_hsv_v_max_ = this->declare_parameter<int>("calib_hsv_v_max", 168);
-  calib_min_area_ = this->declare_parameter<int>("calib_min_area", 80);
-  calib_min_major_px_ = this->declare_parameter<int>("calib_min_major_px", 8);
-  calib_max_major_ratio_ =
-      this->declare_parameter<double>("calib_max_major_ratio", 0.65);
-  calib_fill_min_ = this->declare_parameter<double>("calib_fill_min", 0.25);
-
   // Localization parameters
   landmark_map_x_ = this->declare_parameter<double>("landmark_map_x", -0.409);
   landmark_map_y_ = this->declare_parameter<double>("landmark_map_y", 1.0);
@@ -147,20 +130,6 @@ void LineDetectorNode::sanitize_parameters() {
   for (auto& c : draw_color_bgr_) {
     c = std::max(int64_t(0), std::min(int64_t(255), c));
   }
-
-  // Calibration parameters
-  camera_height_m_ = std::max(0.01, camera_height_m_);
-  landmark_distance_m_ = std::max(0.01, landmark_distance_m_);
-  calib_timeout_sec_ = std::max(0.0, calib_timeout_sec_);
-
-  calib_hsv_s_max_ = std::max(0, std::min(255, calib_hsv_s_max_));
-  calib_hsv_v_min_ = std::max(0, std::min(255, calib_hsv_v_min_));
-  calib_hsv_v_max_ =
-      std::max(calib_hsv_v_min_, std::min(255, calib_hsv_v_max_));
-  calib_min_area_ = std::max(1, calib_min_area_);
-  calib_min_major_px_ = std::max(1, calib_min_major_px_);
-  calib_max_major_ratio_ = std::max(0.1, std::min(1.0, calib_max_major_ratio_));
-  calib_fill_min_ = std::max(0.0, std::min(1.0, calib_fill_min_));
 }
 
 void LineDetectorNode::setup_publishers() {
@@ -440,7 +409,7 @@ void LineDetectorNode::perform_localization(
     const std::vector<cv::Vec4i>& segments_out, const cv::Mat& original_img) {
   // Use full-resolution image for detection
   const double scale = 1.0;
-  cv::Rect detect_roi = valid_roi(original_img, calib_roi_);
+  cv::Rect detect_roi = valid_roi(original_img, calibrator_->get_calib_roi());
 
   double x_full, v_full;
   bool found = calibrator_->detect_landmark_center(
@@ -455,7 +424,7 @@ void LineDetectorNode::perform_localization(
   const double u = (v_full - cy_) / fy_;
   const double phi = estimated_pitch_rad_;
   const double tan_phi = std::tan(phi);
-  const double h = camera_height_m_;
+  const double h = calibrator_->get_camera_height();
 
   // Distance to landmark
   const double denom = (tan_phi + u);
