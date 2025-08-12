@@ -45,6 +45,15 @@ class CameraCalibrator {
 
  private:
   // Internal utility methods
+  cv::Mat create_hsv_mask(const cv::Mat& bgr_img);
+  bool find_ellipse_from_contours(
+      const std::vector<std::vector<cv::Point>>& contours,
+      const cv::Mat& bgr_img, const cv::Mat& hsv_img, const cv::Mat& mask,
+      cv::RotatedRect& best_ellipse);
+  bool find_ellipse_edge_based(const cv::Mat& bgr_img, const cv::Mat& mask,
+                               cv::RotatedRect& best_ellipse);
+  double score_ellipse(const cv::RotatedRect& ellipse, const cv::Mat& bgr_img,
+                       const cv::Mat& hsv_img, const cv::Mat&);
   cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
   void try_finalize_calibration();
   static double median(std::vector<double> v);
