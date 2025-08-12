@@ -22,9 +22,87 @@ using std::placeholders::_1;
 static inline double deg2rad(double deg) { return deg * CV_PI / 180.0; }
 static inline double rad2deg(double rad) { return rad * 180.0 / CV_PI; }
 
+// Forward declaration
+class LineDetectorNode;
+
+class CameraCalibrator {
+ public:
+  CameraCalibrator(LineDetectorNode* node);
+
+  // Main processing method
+  bool process_frame(const cv::Mat& img);
+
+  // State queries
+  bool is_calibration_complete() const { return calibration_complete_; }
+  double get_estimated_pitch() const { return estimated_pitch_rad_; }
+
+  // Visualization data access
+  bool has_valid_circle() const { return last_circle_valid_; }
+  bool has_valid_ellipse() const { return last_ellipse_valid_; }
+  cv::Point2d get_last_circle() const { return last_circle_px_; }
+  cv::RotatedRect get_last_ellipse() const { return last_ellipse_full_; }
+  cv::Mat get_last_hsv_mask() const { return last_calib_hsv_mask_; }
+
+  // Metrics for visualization
+  double get_last_angle_deg() const { return last_angle_deg_; }
+  double get_last_ratio() const { return last_ratio_; }
+  double get_last_mean_s() const { return last_mean_s_; }
+  double get_last_mean_v() const { return last_mean_v_; }
+
+  bool detect_landmark_center(const cv::Mat& work_img, const cv::Rect& roi,
+                              double scale, double& x_full_out,
+                              double& v_full_out);
+
+ private:
+  // Internal utility methods
+  cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
+  void try_finalize_calibration();
+  static double median(std::vector<double> v);
+
+  LineDetectorNode* node_;
+
+  // Calibration state
+  bool calibration_complete_{false};
+  bool calib_started_{false};
+  rclcpp::Time calib_start_time_;
+  double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
+  std::vector<double> v_samples_;
+  static constexpr size_t kMinCalibSamples = 10;
+  static constexpr size_t kMaxCalibSamples = 30;
+
+  // Detection results for visualization
+  bool last_circle_valid_{false};
+  cv::Point2d last_circle_px_{};
+  bool last_ellipse_valid_{false};
+  cv::RotatedRect last_ellipse_full_{};
+  double last_angle_deg_{};
+  double last_ratio_{};
+  double last_mean_s_{};
+  double last_mean_v_{};
+  double last_fill_{};
+  cv::Mat last_calib_hsv_mask_;
+
+  // Parameter cache (fetched from node)
+  double camera_height_m_;
+  double landmark_distance_m_;
+  double calib_timeout_sec_;
+  std::vector<int64_t> calib_roi_;
+  int calib_hsv_s_max_;
+  int calib_hsv_v_min_;
+  int calib_hsv_v_max_;
+  int calib_min_area_;
+  int calib_min_major_px_;
+  double calib_max_major_ratio_;
+  double calib_fill_min_;
+
+  // Internal methods moved to CameraCalibrator
+};
+
 class LineDetectorNode : public rclcpp::Node {
  public:
-  LineDetectorNode() : rclcpp::Node("etrobo_line_detector") {
+  enum class State { Calibrating, Localizing };
+
+  LineDetectorNode() : Node("etrobo_line_detector") {
     declare_parameters();
     sanitize_parameters();
     setup_publishers();
@@ -32,12 +110,19 @@ class LineDetectorNode : public rclcpp::Node {
     setup_camera_info_subscription();
     setup_parameter_callback();
 
+    // Initialize calibrator after parameters are set
+    calibrator_ = std::make_unique<CameraCalibrator>(this);
+
     RCLCPP_INFO(this->get_logger(),
                 "Line detector node initialized. Subscribing to: %s",
                 image_topic_.c_str());
   }
 
+  // Make CameraCalibrator a friend class to access private members
+  friend class CameraCalibrator;
+
  private:
+  // ===== Core methods =====
   void declare_parameters() {
     image_topic_ = this->declare_parameter<std::string>("image_topic", "image");
     camera_info_topic_ = this->declare_parameter<std::string>(
@@ -106,9 +191,67 @@ class LineDetectorNode : public rclcpp::Node {
     landmark_map_y_ = this->declare_parameter<double>("landmark_map_y", 1.0);
   }
 
+  void sanitize_parameters() {
+    // Clamp to valid ranges
+    blur_ksize_ = std::max(1, blur_ksize_);
+    if ((blur_ksize_ % 2) == 0) blur_ksize_++;  // Ensure odd kernel size
+    blur_sigma_ = std::max(0.0, blur_sigma_);
+    canny_low_ = std::max(0, canny_low_);
+    canny_high_ = std::max(canny_low_, canny_high_);
+    canny_aperture_ = std::max(3, canny_aperture_);
+    if ((canny_aperture_ % 2) == 0) canny_aperture_++;
+    if (canny_aperture_ > 7) canny_aperture_ = 7;
+
+    rho_ = std::max(0.1, rho_);
+    theta_deg_ = std::max(0.01, std::min(theta_deg_, 180.0));
+    threshold_ = std::max(1, threshold_);
+    min_line_length_ = std::max(1.0, min_line_length_);
+    max_line_gap_ = std::max(0.0, max_line_gap_);
+
+    if (min_theta_deg_ < 0.0) min_theta_deg_ = 0.0;
+    if (max_theta_deg_ > 180.0) max_theta_deg_ = 180.0;
+    if (min_theta_deg_ > max_theta_deg_) {
+      std::swap(min_theta_deg_, max_theta_deg_);
+    }
+
+    // HSV ranges
+    hsv_lower_h_ = std::max(0, std::min(179, hsv_lower_h_));
+    hsv_upper_h_ = std::max(0, std::min(180, hsv_upper_h_));
+    hsv_lower_s_ = std::max(0, std::min(255, hsv_lower_s_));
+    hsv_upper_s_ = std::max(0, std::min(255, hsv_upper_s_));
+    hsv_lower_v_ = std::max(0, std::min(255, hsv_lower_v_));
+    hsv_upper_v_ = std::max(0, std::min(255, hsv_upper_v_));
+
+    hsv_dilate_kernel_ = std::max(0, hsv_dilate_kernel_);
+    hsv_dilate_iter_ = std::max(0, hsv_dilate_iter_);
+
+    // Draw parameters
+    draw_thickness_ = std::max(1, draw_thickness_);
+    if (draw_color_bgr_.size() != 3) {
+      draw_color_bgr_ = {0, 255, 0};  // Default green
+    }
+    for (auto& c : draw_color_bgr_) {
+      c = std::max(int64_t(0), std::min(int64_t(255), c));
+    }
+
+    // Calibration parameters
+    camera_height_m_ = std::max(0.01, camera_height_m_);
+    landmark_distance_m_ = std::max(0.01, landmark_distance_m_);
+    calib_timeout_sec_ = std::max(0.0, calib_timeout_sec_);
+
+    calib_hsv_s_max_ = std::max(0, std::min(255, calib_hsv_s_max_));
+    calib_hsv_v_min_ = std::max(0, std::min(255, calib_hsv_v_min_));
+    calib_hsv_v_max_ =
+        std::max(calib_hsv_v_min_, std::min(255, calib_hsv_v_max_));
+    calib_min_area_ = std::max(1, calib_min_area_);
+    calib_min_major_px_ = std::max(1, calib_min_major_px_);
+    calib_max_major_ratio_ =
+        std::max(0.1, std::min(1.0, calib_max_major_ratio_));
+    calib_fill_min_ = std::max(0.0, std::min(1.0, calib_fill_min_));
+  }
+
   void setup_publishers() {
     // Use SensorData QoS but set RELIABLE to interoperate with image_view
-    // (subscriber expects reliable reliability).
     auto pub_qos = rclcpp::SensorDataQoS();
     pub_qos.reliable();
     if (publish_image_) {
@@ -140,9 +283,140 @@ class LineDetectorNode : public rclcpp::Node {
         &LineDetectorNode::on_parameters_set, this, std::placeholders::_1));
   }
 
+  rcl_interfaces::msg::SetParametersResult on_parameters_set(
+      const std::vector<rclcpp::Parameter>& parameters) {
+    std::lock_guard<std::mutex> lock(param_mutex_);
+    for (const auto& param : parameters) {
+      const std::string& name = param.get_name();
+      // Update processing parameters dynamically
+      if (name == "blur_ksize")
+        blur_ksize_ = param.as_int();
+      else if (name == "blur_sigma")
+        blur_sigma_ = param.as_double();
+      else if (name == "canny_low")
+        canny_low_ = param.as_int();
+      else if (name == "canny_high")
+        canny_high_ = param.as_int();
+      else if (name == "canny_aperture")
+        canny_aperture_ = param.as_int();
+      else if (name == "canny_L2gradient")
+        canny_L2gradient_ = param.as_bool();
+      else if (name == "use_hsv_mask")
+        use_hsv_mask_ = param.as_bool();
+      else if (name == "show_edges")
+        show_edges_ = param.as_bool();
+      else if (name == "publish_image_with_lines") {
+        publish_image_ = param.as_bool();
+        if (publish_image_ && !image_pub_) {
+          auto pub_qos = rclcpp::SensorDataQoS();
+          pub_qos.reliable();
+          image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+              "image_with_lines", pub_qos);
+        }
+      }
+      // ... Add other parameters as needed
+    }
+    sanitize_parameters();
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    return result;
+  }
+
+  void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
+    if (msg->k.size() >= 9) {
+      fx_ = msg->k[0];
+      fy_ = msg->k[4];
+      cx_ = msg->k[2];
+      cy_ = msg->k[5];
+      has_cam_info_ = true;
+    } else if (msg->p.size() >= 12) {
+      fx_ = msg->p[0];
+      fy_ = msg->p[5];
+      cx_ = msg->p[2];
+      cy_ = msg->p[6];
+      has_cam_info_ = true;
+    }
+  }
+
+  cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi) {
+    if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
+    int x = static_cast<int>(roi[0]);
+    int y = static_cast<int>(roi[1]);
+    int w = static_cast<int>(roi[2]);
+    int h = static_cast<int>(roi[3]);
+    if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+      return cv::Rect(0, 0, img.cols, img.rows);
+    }
+    x = std::max(0, std::min(x, img.cols - 1));
+    y = std::max(0, std::min(y, img.rows - 1));
+    w = std::min(w, img.cols - x);
+    h = std::min(h, img.rows - y);
+    return cv::Rect(x, y, w, h);
+  }
+
+  // ===== Main image processing callback =====
+  void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(param_mutex_);
+
+    // Step 1: Preprocess the image
+    cv::Mat original_img, work_img;
+    cv::Rect roi_rect;
+    cv::Mat gray = preprocess_image(msg, original_img, work_img, roi_rect);
+    if (gray.empty()) return;
+
+    // Step 2: Calibration phase
+    if (state_ == State::Calibrating) {
+      if (calibrator_->process_frame(original_img)) {
+        // Calibration completed
+        estimated_pitch_rad_ = calibrator_->get_estimated_pitch();
+        state_ = State::Localizing;
+        RCLCPP_INFO(this->get_logger(), "Calibration complete. Pitch: %.2f deg",
+                    rad2deg(estimated_pitch_rad_));
+      }
+    }
+
+    // Step 3: Edge detection
+    cv::Mat edges = detect_edges(gray, work_img);
+
+    // Step 4: Line detection
+    std::vector<cv::Vec4i> segments_out;
+    detect_lines(edges, segments_out);
+
+    // Step 5: Publish lines data
+    publish_lines(segments_out, roi_rect);
+
+    // Step 6: Localization (if calibrated)
+    if (state_ == State::Localizing) {
+      perform_localization(segments_out, original_img);
+    }
+
+    // Step 7: Visualization
+    if (publish_image_ && image_pub_) {
+      publish_visualization(msg, original_img, work_img, edges, segments_out,
+                            roi_rect);
+    }
+
+    // Step 8: Log timing
+    const auto t1 = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+            t1 - t0)
+            .count();
+
+    if (state_ == State::Localizing && localization_valid_) {
+      RCLCPP_INFO(this->get_logger(),
+                  "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
+                  last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
+                  segments_out.size(), ms);
+    }
+  }
+
   cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
-                           cv::Mat &original_img, cv::Mat &work_img,
-                           cv::Rect &roi_rect) {
+                           cv::Mat& original_img, cv::Mat& work_img,
+                           cv::Rect& roi_rect) {
     // Convert to cv::Mat
     cv_bridge::CvImageConstPtr cv_ptr;
     try {
@@ -153,7 +427,7 @@ class LineDetectorNode : public rclcpp::Node {
         // Convert all other encodings (including RGB8) to BGR8
         cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
       }
-    } catch (const cv_bridge::Exception &e) {
+    } catch (const cv_bridge::Exception& e) {
       RCLCPP_WARN(this->get_logger(), "cv_bridge exception: %s", e.what());
       return cv::Mat();
     }
@@ -183,11 +457,12 @@ class LineDetectorNode : public rclcpp::Node {
     return gray;
   }
 
-  cv::Mat detect_edges(const cv::Mat &gray, const cv::Mat &work) {
+  cv::Mat detect_edges(const cv::Mat& gray, const cv::Mat& work) {
     // Canny
     cv::Mat edges;
     cv::Canny(gray, edges, canny_low_, canny_high_, canny_aperture_,
               canny_L2gradient_);
+
     // Optional HSV mask AFTER Canny to avoid weakening edges before gradient
     if (use_hsv_mask_) {
       cv::Mat hsv_src;
@@ -199,901 +474,149 @@ class LineDetectorNode : public rclcpp::Node {
       }
       const cv::Scalar lower(hsv_lower_h_, hsv_lower_s_, hsv_lower_v_);
       const cv::Scalar upper(hsv_upper_h_, hsv_upper_s_, hsv_upper_v_);
-      cv::Mat mask;
-      cv::inRange(hsv_src, lower, upper, mask);
-      // Thicken mask slightly so boundary edges survive masking
-      if (hsv_dilate_iter_ > 0) {
+      cv::Mat hsv_mask;
+      cv::inRange(hsv_src, lower, upper, hsv_mask);
+
+      // Morphological operations
+      if (hsv_dilate_kernel_ > 0 && hsv_dilate_iter_ > 0) {
         cv::Mat kernel = cv::getStructuringElement(
             cv::MORPH_RECT, cv::Size(hsv_dilate_kernel_, hsv_dilate_kernel_));
-        cv::dilate(mask, mask, kernel, cv::Point(-1, -1), hsv_dilate_iter_);
+        cv::dilate(hsv_mask, hsv_mask, kernel, cv::Point(-1, -1),
+                   hsv_dilate_iter_);
       }
-      cv::bitwise_and(edges, mask, edges);
+
+      // Mask the edges
+      cv::bitwise_and(edges, hsv_mask, edges);
     }
 
     return edges;
   }
 
-  std::vector<cv::Vec4i> detect_lines(const cv::Mat &edges) {
-    std::vector<cv::Vec4i> segments;
+  void detect_lines(const cv::Mat& edges,
+                    std::vector<cv::Vec4i>& segments_out) {
+    segments_out.clear();
+    const double theta_rad = deg2rad(theta_deg_);
+    const double min_theta_rad = deg2rad(min_theta_deg_);
+    const double max_theta_rad = deg2rad(max_theta_deg_);
+
     if (hough_type_ == "standard") {
+      // Standard Hough
       std::vector<cv::Vec2f> lines;
-      double theta = deg2rad(theta_deg_);
-      cv::HoughLines(edges, lines, rho_, theta, threshold_);
-      double min_tr = deg2rad(min_theta_deg_);
-      double max_tr = deg2rad(max_theta_deg_);
-      segments = hough_standard_to_segments(lines, edges.cols, edges.rows,
-                                            min_tr, max_tr);
+      cv::HoughLines(edges, lines, rho_, theta_rad, threshold_, 0, 0,
+                     min_theta_rad, max_theta_rad);
+      // Convert polar to Cartesian
+      for (const auto& line : lines) {
+        float r = line[0], t = line[1];
+        double a = std::cos(t), b = std::sin(t);
+        double x0 = a * r, y0 = b * r;
+        cv::Vec4i seg;
+        seg[0] = cvRound(x0 + 1000 * (-b));
+        seg[1] = cvRound(y0 + 1000 * (a));
+        seg[2] = cvRound(x0 - 1000 * (-b));
+        seg[3] = cvRound(y0 - 1000 * (a));
+        segments_out.push_back(seg);
+      }
     } else {
-      // probabilistic default
-      cv::HoughLinesP(edges, segments, rho_, deg2rad(theta_deg_), threshold_,
+      // Probabilistic Hough (default)
+      cv::HoughLinesP(edges, segments_out, rho_, theta_rad, threshold_,
                       min_line_length_, max_line_gap_);
-    }
-    return segments;
-  }
-
-  std::vector<cv::Vec4i> restore_coordinates(
-      const std::vector<cv::Vec4i> &segments, const cv::Rect &roi_rect) {
-    std::vector<cv::Vec4i> segments_full;
-    segments_full.reserve(segments.size());
-    for (const auto &l : segments) {
-      // Direct coordinate translation (no scaling needed)
-      int x1 = l[0] + roi_rect.x;
-      int y1 = l[1] + roi_rect.y;
-      int x2 = l[2] + roi_rect.x;
-      int y2 = l[3] + roi_rect.y;
-      segments_full.emplace_back(cv::Vec4i{x1, y1, x2, y2});
-    }
-    return segments_full;
-  }
-
-  void publish_visualization(const std::vector<cv::Vec4i> &segments,
-                             const cv::Mat &original_img, const cv::Mat &edges,
-                             const cv::Rect &roi_rect,
-                             const std_msgs::msg::Header &header) {
-    if (!image_pub_) return;
-
-    cv::Mat vis;
-
-    // If show_edges is enabled, display edge image instead of original
-    if (show_edges_) {
-      // Create full-size edge image and paste ROI-sized edges directly
-      cv::Mat edges_original =
-          cv::Mat::zeros(original_img.rows, original_img.cols, CV_8UC1);
-      edges.copyTo(edges_original(roi_rect));
-
-      // Convert to BGR for visualization
-      cv::cvtColor(edges_original, vis, cv::COLOR_GRAY2BGR);
-    } else {
-      // Use original image
-      if (original_img.channels() == 1) {
-        cv::cvtColor(original_img, vis, cv::COLOR_GRAY2BGR);
-      } else {
-        vis = original_img.clone();
-      }
-    }
-
-    // Draw line segments with BGR color (only when not showing edges)
-    if (!show_edges_) {
-      cv::Scalar line_color(static_cast<int>(draw_color_bgr_[0]),
-                            static_cast<int>(draw_color_bgr_[1]),
-                            static_cast<int>(draw_color_bgr_[2]));
-
-      for (const auto &l : segments) {
-        cv::line(vis, cv::Point(l[0], l[1]), cv::Point(l[2], l[3]), line_color,
-                 draw_thickness_);
-      }
-    }
-
-    // Calibration overlay: draw detected gray ellipse/circle and line from
-    // camera ground foot
-    if (last_circle_valid_ || last_ellipse_valid_) {
-      // Fixed colors for calibration display
-      cv::Scalar circle_color(0, 255, 255);  // yellow
-      cv::Scalar text_color(0, 255, 255);    // yellow
-      cv::Scalar line_color(255, 200, 0);    // cyan
-      cv::Scalar point_color(0, 128, 255);   // orange
-      cv::Scalar bg_color(128, 128, 128);    // gray
-
-      cv::Point c_pt(static_cast<int>(std::lround(last_circle_px_.x)),
-                     static_cast<int>(std::lround(last_circle_px_.y)));
-      if (last_ellipse_valid_) {
-        cv::ellipse(vis, last_ellipse_full_, circle_color, 2);
-        c_pt = cv::Point(
-            static_cast<int>(std::lround(last_ellipse_full_.center.x)),
-            static_cast<int>(std::lround(last_ellipse_full_.center.y)));
-      }
-      if (c_pt.x >= 0 && c_pt.y >= 0 && c_pt.x < vis.cols &&
-          c_pt.y < vis.rows) {
-        cv::circle(vis, c_pt, 6, circle_color, 2);
-      }
-      // Annotate selected candidate metrics (a/r/V/S)
-      if (last_ellipse_valid_) {
-        char txt2[80];
-        std::snprintf(txt2, sizeof(txt2), "a=%.0f r=%.2f v=%.0f s=%.0f",
-                      last_angle_deg_, last_ratio_, last_mean_v_, last_mean_s_);
-        cv::Point t2p(c_pt.x + 8, c_pt.y - 8);
-
-        // Add semi-transparent gray background for better visibility
-        int baseline = 0;
-        cv::Size text_size =
-            cv::getTextSize(txt2, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
-        cv::Mat overlay;
-        vis.copyTo(overlay);
-        cv::rectangle(
-            overlay, cv::Point(t2p.x - 2, t2p.y - text_size.height - baseline),
-            cv::Point(t2p.x + text_size.width + 2, t2p.y + baseline + 2),
-            bg_color, cv::FILLED);
-        cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
-
-        // Draw text with smaller font and normal thickness
-        cv::putText(vis, txt2, t2p, cv::FONT_HERSHEY_SIMPLEX, 0.4, text_color,
-                    1);
-      }
-      if (has_cam_info_ && std::isfinite(estimated_pitch_rad_)) {
-        // Compute ground foot projection pixel
-        double tan_theta = std::tan(estimated_pitch_rad_);
-        if (std::abs(tan_theta) > 1e-6) {
-          double v0 = cy_ - fy_ / tan_theta;  // row of camera ground foot
-          double u0 = cx_;                    // column at principal point
-          cv::Point p0(static_cast<int>(std::lround(u0)),
-                       static_cast<int>(std::lround(v0)));
-          cv::Point p1 = c_pt;
-          cv::Rect rect(0, 0, vis.cols, vis.rows);
-          cv::Point p0c = p0, p1c = p1;
-          if (cv::clipLine(rect, p0c, p1c)) {
-            cv::line(vis, p0c, p1c, line_color, 2);
-            cv::circle(vis, p0c, 4, point_color, -1);
+      // Filter by angle
+      if (min_theta_deg_ > 0.0 || max_theta_deg_ < 180.0) {
+        std::vector<cv::Vec4i> filtered;
+        for (const auto& seg : segments_out) {
+          double dx = seg[2] - seg[0];
+          double dy = seg[3] - seg[1];
+          double angle_rad = std::atan2(std::abs(dy), std::abs(dx));
+          if (angle_rad >= min_theta_rad && angle_rad <= max_theta_rad) {
+            filtered.push_back(seg);
           }
-          // Overlay text with distance and pitch
-          char buf[128];
-          std::snprintf(buf, sizeof(buf), "D=%.2fm, pitch=%.2f deg",
-                        landmark_distance_m_, rad2deg(estimated_pitch_rad_));
-          int baseline = 0;
-          cv::Size txt =
-              cv::getTextSize(buf, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
-          cv::Point org(10, 20 + txt.height);
-
-          // Semi-transparent gray background
-          cv::Mat overlay;
-          vis.copyTo(overlay);
-          cv::rectangle(overlay, org + cv::Point(0, baseline),
-                        org + cv::Point(txt.width, -txt.height), bg_color,
-                        cv::FILLED);
-          cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
-
-          cv::putText(vis, buf, org, cv::FONT_HERSHEY_SIMPLEX, 0.5, text_color,
-                      1);
         }
+        segments_out = std::move(filtered);
       }
     }
-
-    // Show calibration ROI and HSV mask during calibration for debugging
-    if (state_ == State::CalibratePitch) {
-      // Fixed color for calibration ROI
-      cv::Scalar calib_rect_color(255, 0, 0);  // blue
-
-      // Draw calib ROI if provided
-      if (calib_roi_.size() == 4 && calib_roi_[0] >= 0 && calib_roi_[1] >= 0 &&
-          calib_roi_[2] > 0 && calib_roi_[3] > 0) {
-        cv::Rect cr(
-            static_cast<int>(calib_roi_[0]), static_cast<int>(calib_roi_[1]),
-            static_cast<int>(calib_roi_[2]), static_cast<int>(calib_roi_[3]));
-        cv::rectangle(vis, cr, calib_rect_color, 1);
-      }
-
-      // Show HSV mask in top-right corner
-      if (!last_calib_hsv_mask_.empty()) {
-        const int mask_display_width = 160;   // Display width
-        const int mask_display_height = 120;  // Display height
-        const int margin = 10;
-
-        // Resize HSV mask for display
-        cv::Mat mask_display;
-        cv::resize(last_calib_hsv_mask_, mask_display,
-                   cv::Size(mask_display_width, mask_display_height), 0, 0,
-                   cv::INTER_NEAREST);
-
-        // Convert mask to BGR for overlay
-        cv::Mat mask_overlay;
-        cv::cvtColor(mask_display, mask_overlay, cv::COLOR_GRAY2BGR);
-
-        // Position in top-right corner
-        cv::Point mask_pos(vis.cols - mask_display_width - margin, margin);
-        cv::Rect mask_rect(mask_pos.x, mask_pos.y, mask_display_width,
-                           mask_display_height);
-
-        // Check bounds and copy
-        if (mask_pos.x >= 0 && mask_pos.y >= 0 &&
-            mask_pos.x + mask_display_width <= vis.cols &&
-            mask_pos.y + mask_display_height <= vis.rows) {
-          // Add semi-transparent background
-          cv::Mat overlay;
-          vis.copyTo(overlay);
-          cv::rectangle(overlay, mask_rect, cv::Scalar(0, 0, 0), cv::FILLED);
-          cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
-
-          // Overlay the mask
-          mask_overlay.copyTo(vis(mask_rect));
-
-          // Add border and label
-          cv::rectangle(vis, mask_rect, cv::Scalar(128, 128, 128), 2);
-          cv::putText(vis, "HSV Mask", cv::Point(mask_pos.x, mask_pos.y + 10),
-                      cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255, 255, 255),
-                      1);
-        }
-      }
-    }
-
-    // Show localization information during localization mode
-    if (state_ == State::Localize && localization_valid_) {
-      cv::Scalar info_color(0, 255, 255);  // yellow
-      cv::Scalar bg_color(128, 128, 128);  // gray
-
-      // Display robot pose information
-      char pose_buf[128];
-      std::snprintf(pose_buf, sizeof(pose_buf),
-                    "Robot: x=%.2f, y=%.2f, yaw=%.1f deg", last_robot_x_,
-                    last_robot_y_, rad2deg(last_robot_yaw_));
-
-      int baseline = 0;
-      cv::Size pose_text_size = cv::getTextSize(
-          pose_buf, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
-      cv::Point pose_org(10, vis.rows - 30);
-
-      // Semi-transparent gray background
-      cv::Mat overlay;
-      vis.copyTo(overlay);
-      cv::rectangle(
-          overlay, pose_org + cv::Point(0, baseline),
-          pose_org + cv::Point(pose_text_size.width, -pose_text_size.height),
-          bg_color, cv::FILLED);
-      cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
-
-      cv::putText(vis, pose_buf, pose_org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
-                  info_color, 1);
-
-      // Display landmark map coordinates
-      char landmark_buf[128];
-      std::snprintf(landmark_buf, sizeof(landmark_buf),
-                    "Landmark: (%.3f, %.3f)", landmark_map_x_, landmark_map_y_);
-
-      cv::Size landmark_text_size = cv::getTextSize(
-          landmark_buf, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
-      cv::Point landmark_org(10, vis.rows - 10);
-
-      vis.copyTo(overlay);
-      cv::rectangle(overlay, landmark_org + cv::Point(0, baseline),
-                    landmark_org + cv::Point(landmark_text_size.width,
-                                             -landmark_text_size.height),
-                    bg_color, cv::FILLED);
-      cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
-
-      cv::putText(vis, landmark_buf, landmark_org, cv::FONT_HERSHEY_SIMPLEX,
-                  0.4, info_color, 1);
-    }
-
-    cv_bridge::CvImage out_img;
-    out_img.header = header;
-    out_img.encoding = sensor_msgs::image_encodings::BGR8;
-    out_img.image = vis;
-    image_pub_->publish(*out_img.toImageMsg());
   }
 
-  void publish_lines_data(const std::vector<cv::Vec4i> &segments) {
-    std_msgs::msg::Float32MultiArray lines_msg;
-    lines_msg.layout.dim.resize(1);
-    lines_msg.layout.dim[0].label = "lines_flat_xyxy";
-    lines_msg.layout.dim[0].size = segments.size() * 4;
-    lines_msg.layout.dim[0].stride = lines_msg.layout.dim[0].size;
-    lines_msg.data.reserve(segments.size() * 4);
-    for (const auto &l : segments) {
-      lines_msg.data.push_back(static_cast<float>(l[0]));
-      lines_msg.data.push_back(static_cast<float>(l[1]));
-      lines_msg.data.push_back(static_cast<float>(l[2]));
-      lines_msg.data.push_back(static_cast<float>(l[3]));
+  void publish_lines(const std::vector<cv::Vec4i>& segments,
+                     const cv::Rect& roi_rect) {
+    auto lines_msg = std_msgs::msg::Float32MultiArray();
+    lines_msg.layout.dim.resize(2);
+    lines_msg.layout.dim[0].label = "lines";
+    lines_msg.layout.dim[0].size = segments.size();
+    lines_msg.layout.dim[0].stride = segments.size() * 4;
+    lines_msg.layout.dim[1].label = "points";
+    lines_msg.layout.dim[1].size = 4;
+    lines_msg.layout.dim[1].stride = 4;
+
+    for (const auto& seg : segments) {
+      // Map to full image coordinates
+      lines_msg.data.push_back(static_cast<float>(seg[0] + roi_rect.x));
+      lines_msg.data.push_back(static_cast<float>(seg[1] + roi_rect.y));
+      lines_msg.data.push_back(static_cast<float>(seg[2] + roi_rect.x));
+      lines_msg.data.push_back(static_cast<float>(seg[3] + roi_rect.y));
     }
     lines_pub_->publish(lines_msg);
   }
 
-  void sanitize_parameters() {
-    if (blur_ksize_ <= 0) blur_ksize_ = 1;
-    if (blur_ksize_ % 2 == 0) blur_ksize_ += 1;  // must be odd
-
-    if (canny_low_ < 0) canny_low_ = 0;
-    if (canny_high_ < 0) canny_high_ = 0;
-    if (canny_aperture_ != 3 && canny_aperture_ != 5 && canny_aperture_ != 7) {
-      canny_aperture_ = 3;
-    }
-    if (theta_deg_ <= 0.0) theta_deg_ = 1.0;
-    if (threshold_ < 1) threshold_ = 1;
-    if (min_theta_deg_ < 0.0) min_theta_deg_ = 0.0;
-    if (max_theta_deg_ > 180.0) max_theta_deg_ = 180.0;
-    if (min_theta_deg_ > max_theta_deg_)
-      std::swap(min_theta_deg_, max_theta_deg_);
-    if (draw_color_bgr_.size() != 3) draw_color_bgr_ = {0, 255, 0};
-    // HSV boundaries and morphology
-    auto clamp = [](int v, int lo, int hi) {
-      return std::max(lo, std::min(v, hi));
-    };
-    hsv_lower_h_ = clamp(hsv_lower_h_, 0, 180);
-    hsv_upper_h_ = clamp(hsv_upper_h_, 0, 180);
-    hsv_lower_s_ = clamp(hsv_lower_s_, 0, 255);
-    hsv_upper_s_ = clamp(hsv_upper_s_, 0, 255);
-    hsv_lower_v_ = clamp(hsv_lower_v_, 0, 255);
-    hsv_upper_v_ = clamp(hsv_upper_v_, 0, 255);
-    if (hsv_lower_h_ > hsv_upper_h_) std::swap(hsv_lower_h_, hsv_upper_h_);
-    if (hsv_lower_s_ > hsv_upper_s_) std::swap(hsv_lower_s_, hsv_upper_s_);
-    if (hsv_lower_v_ > hsv_upper_v_) std::swap(hsv_lower_v_, hsv_upper_v_);
-    if (hsv_dilate_kernel_ < 1) hsv_dilate_kernel_ = 1;
-    if ((hsv_dilate_kernel_ % 2) == 0) hsv_dilate_kernel_ += 1;  // make odd
-    if (hsv_dilate_iter_ < 0) hsv_dilate_iter_ = 0;
-    // Calibration thresholds
-    if (calib_hsv_s_max_ < 0) calib_hsv_s_max_ = 0;
-    if (calib_hsv_s_max_ > 255) calib_hsv_s_max_ = 255;
-    if (calib_hsv_v_min_ < 0) calib_hsv_v_min_ = 0;
-    if (calib_hsv_v_min_ > 255) calib_hsv_v_min_ = 255;
-    if (calib_hsv_v_max_ < 0) calib_hsv_v_max_ = 0;
-    if (calib_hsv_v_max_ > 255) calib_hsv_v_max_ = 255;
-    if (calib_hsv_v_min_ > calib_hsv_v_max_)
-      std::swap(calib_hsv_v_min_, calib_hsv_v_max_);
-    if (calib_min_area_ < 0) calib_min_area_ = 0;
-    if (calib_min_major_px_ < 0) calib_min_major_px_ = 0;
-    if (calib_max_major_ratio_ <= 0.0) calib_max_major_ratio_ = 0.65;
-    if (calib_max_major_ratio_ > 1.0) calib_max_major_ratio_ = 1.0;
-  }
-
-  rcl_interfaces::msg::SetParametersResult on_parameters_set(
-      const std::vector<rclcpp::Parameter> &params) {
-    std::lock_guard<std::mutex> lock(param_mutex_);
-    rcl_interfaces::msg::SetParametersResult result;
-    result.successful = true;
-    result.reason = "ok";
-
-    for (const auto &p : params) {
-      const auto &name = p.get_name();
-      try {
-        if (name == "use_hsv_mask")
-          use_hsv_mask_ = p.as_bool();
-        else if (name == "blur_ksize")
-          blur_ksize_ = p.as_int();
-        else if (name == "blur_sigma")
-          blur_sigma_ = p.as_double();
-        else if (name == "roi")
-          roi_ = p.as_integer_array();
-
-        else if (name == "canny_low")
-          canny_low_ = p.as_int();
-        else if (name == "canny_high")
-          canny_high_ = p.as_int();
-        else if (name == "canny_aperture")
-          canny_aperture_ = p.as_int();
-        else if (name == "canny_L2gradient")
-          canny_L2gradient_ = p.as_bool();
-        else if (name == "hough_type")
-          hough_type_ = p.as_string();
-        else if (name == "rho")
-          rho_ = p.as_double();
-        else if (name == "theta_deg")
-          theta_deg_ = p.as_double();
-        else if (name == "threshold")
-          threshold_ = p.as_int();
-        else if (name == "min_line_length")
-          min_line_length_ = p.as_double();
-        else if (name == "max_line_gap")
-          max_line_gap_ = p.as_double();
-        else if (name == "min_theta_deg")
-          min_theta_deg_ = p.as_double();
-        else if (name == "max_theta_deg")
-          max_theta_deg_ = p.as_double();
-        else if (name == "draw_color_bgr") {
-          auto v = p.as_integer_array();
-          draw_color_bgr_.assign(v.begin(), v.end());
-        } else if (name == "draw_thickness")
-          draw_thickness_ = p.as_int();
-
-        else if (name == "publish_image_with_lines") {
-          // Requires (re)creating publisher. Not supported at runtime.
-          result.successful = false;
-          result.reason =
-              "Changing publish_image_with_lines at runtime is not supported";
-        } else if (name == "show_edges")
-          show_edges_ = p.as_bool();
-        // HSV mask params
-        else if (name == "hsv_lower_h")
-          hsv_lower_h_ = p.as_int();
-        else if (name == "hsv_lower_s")
-          hsv_lower_s_ = p.as_int();
-        else if (name == "hsv_lower_v")
-          hsv_lower_v_ = p.as_int();
-        else if (name == "hsv_upper_h")
-          hsv_upper_h_ = p.as_int();
-        else if (name == "hsv_upper_s")
-          hsv_upper_s_ = p.as_int();
-        else if (name == "hsv_upper_v")
-          hsv_upper_v_ = p.as_int();
-        else if (name == "hsv_dilate_kernel")
-          hsv_dilate_kernel_ = p.as_int();
-        else if (name == "hsv_dilate_iter")
-          hsv_dilate_iter_ = p.as_int();
-        else if (name == "image_topic") {
-          // Do not allow changing topic at runtime as it requires
-          // resubscription
-          result.successful = false;
-          result.reason = "Changing image_topic at runtime is not supported";
-        } else if (name == "camera_info_topic") {
-          result.successful = false;
-          result.reason =
-              "Changing camera_info_topic at runtime is not supported";
-        }
-        // Calibration params
-        else if (name == "camera_height_meters")
-          camera_height_m_ = p.as_double();
-        else if (name == "landmark_distance_meters")
-          landmark_distance_m_ = p.as_double();
-        else if (name == "calib_timeout_sec")
-          calib_timeout_sec_ = p.as_double();
-        else if (name == "calib_roi")
-          calib_roi_ = p.as_integer_array();
-        else if (name == "calib_hsv_s_max")
-          calib_hsv_s_max_ = p.as_int();
-        else if (name == "calib_hsv_v_min")
-          calib_hsv_v_min_ = p.as_int();
-        else if (name == "calib_hsv_v_max")
-          calib_hsv_v_max_ = p.as_int();
-        else if (name == "calib_min_area")
-          calib_min_area_ = p.as_int();
-        else if (name == "calib_min_major_px")
-          calib_min_major_px_ = p.as_int();
-        else if (name == "calib_max_major_ratio")
-          calib_max_major_ratio_ = p.as_double();
-        else if (name == "calib_fill_min")
-          calib_fill_min_ = p.as_double();
-        // Localization params
-        else if (name == "landmark_map_x")
-          landmark_map_x_ = p.as_double();
-        else if (name == "landmark_map_y")
-          landmark_map_y_ = p.as_double();
-      } catch (const std::exception &e) {
-        result.successful = false;
-        result.reason = e.what();
-      }
-    }
-
-    sanitize_parameters();
-    return result;
-  }
-
-  static cv::Rect valid_roi(const cv::Mat &img,
-                            const std::vector<int64_t> &roi) {
-    if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
-    int x = static_cast<int>(roi[0]);
-    int y = static_cast<int>(roi[1]);
-    int w = static_cast<int>(roi[2]);
-    int h = static_cast<int>(roi[3]);
-    if (x < 0 || y < 0 || w <= 0 || h <= 0) {
-      return cv::Rect(0, 0, img.cols, img.rows);
-    }
-    x = std::max(0, std::min(x, img.cols - 1));
-    y = std::max(0, std::min(y, img.rows - 1));
-    w = std::min(w, img.cols - x);
-    h = std::min(h, img.rows - y);
-    return cv::Rect(x, y, w, h);
-  }
-
-  static std::vector<cv::Vec4i> hough_standard_to_segments(
-      const std::vector<cv::Vec2f> &lines, int width, int height,
-      double min_theta_rad, double max_theta_rad) {
-    std::vector<cv::Vec4i> segments;
-    // Image rectangle
-    const cv::Rect rect(0, 0, width, height);
-    for (const auto &l : lines) {
-      float rho = l[0];
-      float theta = l[1];
-      if (theta < min_theta_rad || theta > max_theta_rad) continue;
-
-      double a = std::cos(theta), b = std::sin(theta);
-      double x0 = a * rho, y0 = b * rho;
-      // Compute two points far along the line
-      cv::Point2f pt1, pt2;
-      pt1.x = static_cast<float>(x0 + 10000 * (-b));
-      pt1.y = static_cast<float>(y0 + 10000 * (a));
-      pt2.x = static_cast<float>(x0 - 10000 * (-b));
-      pt2.y = static_cast<float>(y0 - 10000 * (a));
-
-      // Clip the segment to image rectangle
-      // Liang–Barsky would be ideal; OpenCV clipLine works for ints
-      cv::Point p1(cvRound(pt1.x), cvRound(pt1.y));
-      cv::Point p2(cvRound(pt2.x), cvRound(pt2.y));
-      if (cv::clipLine(rect, p1, p2)) {
-        segments.emplace_back(cv::Vec4i(p1.x, p1.y, p2.x, p2.y));
-      }
-    }
-    return segments;
-  }
-
-  void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
-    const auto t0 = std::chrono::steady_clock::now();
-
-    // Guard concurrent parameter updates during frame processing
-    std::lock_guard<std::mutex> param_lock(param_mutex_);
-
-    // Initialize calibration timer on first frame
-    if (!calib_started_) {
-      calib_started_ = true;
-      calib_start_time_ = this->now();
-    }
-
-    // Step 1: Preprocess image
-    cv::Mat img, work;
-    cv::Rect roi_rect;
-    cv::Mat gray = preprocess_image(msg, img, work, roi_rect);
-    if (gray.empty()) return;
-
-    // Step 2: Detect edges
-    cv::Mat edges = detect_edges(gray, work);
-
-    // Step 3: Detect lines
-    std::vector<cv::Vec4i> segments = detect_lines(edges);
-
-    // Step 4: Restore coordinates to original ROI
-    std::vector<cv::Vec4i> segments_full =
-        restore_coordinates(segments, roi_rect);
-
-    // Step 5: Use segments directly without temporal smoothing
-    std::vector<cv::Vec4i> segments_out = segments_full;
-
-    // Step 6: Publish results
-    std_msgs::msg::Header header = msg->header;
-    publish_visualization(segments_out, img, edges, roi_rect, header);
-    if (state_ == State::Localize) {
-      publish_lines_data(segments_out);
-    }
-
-    // Localization mode processing (estimate robot pose using landmarks)
-    if (state_ == State::Localize) {
-      perform_localization(segments_out, img);
+  void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
+                             const cv::Mat& original_img,
+                             const cv::Mat& work_img, const cv::Mat& edges,
+                             const std::vector<cv::Vec4i>& segments,
+                             const cv::Rect& roi_rect) {
+    cv::Mat display;
+    if (show_edges_) {
+      // Show edges instead of lines
+      cv::Mat edges_color;
+      cv::cvtColor(edges, edges_color, cv::COLOR_GRAY2BGR);
+      display = original_img.clone();
+      edges_color.copyTo(display(roi_rect));
     } else {
-      // Debug: Log current state every 100 frames to avoid spam
-      static int frame_count = 0;
-      frame_count++;
-      if (frame_count % 100 == 0) {
-        const char *state_str =
-            (state_ == State::CalibratePitch) ? "CalibratePitch" : "Unknown";
-        RCLCPP_INFO(this->get_logger(),
-                    "Current state: %s (not in Localize mode)", state_str);
+      // Draw lines on the image
+      display = original_img.clone();
+      const cv::Scalar color(static_cast<int>(draw_color_bgr_[0]),
+                             static_cast<int>(draw_color_bgr_[1]),
+                             static_cast<int>(draw_color_bgr_[2]));
+      for (const auto& seg : segments) {
+        cv::line(display, cv::Point(seg[0] + roi_rect.x, seg[1] + roi_rect.y),
+                 cv::Point(seg[2] + roi_rect.x, seg[3] + roi_rect.y), color,
+                 draw_thickness_);
       }
     }
 
-    // Calibration mode processing (detect gray circle and estimate pitch)
-    if (state_ == State::CalibratePitch) {
-      double v_full = 0.0;
-      double x_full = 0.0;
-      // reset last detections each frame
-      last_circle_valid_ = false;
-      last_ellipse_valid_ = false;
-      // Optional calibration ROI intersection (full-res coordinates)
-      cv::Rect calib_full = valid_roi(img, calib_roi_);
-      cv::Rect inter_full = calib_full & roi_rect;
-      if (calib_roi_[0] < 0 || calib_roi_[1] < 0 || calib_roi_[2] <= 0 ||
-          calib_roi_[3] <= 0) {
-        inter_full = roi_rect;
+    // Draw calibration visualization if in calibration state
+    if (state_ == State::Calibrating && calibrator_->has_valid_ellipse()) {
+      cv::RotatedRect ellipse = calibrator_->get_last_ellipse();
+      cv::ellipse(display, ellipse, cv::Scalar(255, 0, 255), 2);
+      if (calibrator_->has_valid_circle()) {
+        cv::Point2d circle = calibrator_->get_last_circle();
+        cv::circle(
+            display,
+            cv::Point(static_cast<int>(circle.x), static_cast<int>(circle.y)),
+            5, cv::Scalar(0, 255, 255), -1);
       }
-      // Map inter_full to 'work' coordinates (no scaling needed)
-      cv::Rect inter_work;
-      inter_work.x = inter_full.x - roi_rect.x;
-      inter_work.y = inter_full.y - roi_rect.y;
-      inter_work.width = inter_full.width;
-      inter_work.height = inter_full.height;
-      inter_work &= cv::Rect(0, 0, work.cols, work.rows);
-
-      cv::Mat work_sub = work;
-      cv::Rect roi_full_for_mapping = roi_rect;
-      if (inter_work.width > 0 && inter_work.height > 0) {
-        work_sub = work(inter_work).clone();
-        roi_full_for_mapping = inter_full;
-      }
-
-      if (detect_landmark_center(work_sub, roi_full_for_mapping, 1.0, x_full,
-                                 v_full)) {
-        last_circle_px_ = cv::Point2d(x_full, v_full);
-        last_circle_valid_ = true;
-        v_samples_.push_back(v_full);
-        if (v_samples_.size() > kMaxCalibSamples) {
-          v_samples_.erase(v_samples_.begin());
-        }
-      }
-      try_finalize_calibration();
     }
 
-    // Step 7: Log timing
-    const auto t1 = std::chrono::steady_clock::now();
-    const double ms =
-        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
-            t1 - t0)
-            .count();
-
-    if (state_ == State::Localize && localization_valid_) {
-      RCLCPP_INFO(this->get_logger(),
-                  "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
-                  last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
-    } else {
-      RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
-                  segments_out.size(), ms);
+    // Draw localization visualization
+    if (state_ == State::Localizing && localization_valid_) {
+      // Draw robot pose info on the image
+      std::string pose_text =
+          cv::format("x:%.2f y:%.2f yaw:%.1f", last_robot_x_, last_robot_y_,
+                     rad2deg(last_robot_yaw_));
+      cv::putText(display, pose_text, cv::Point(10, 30),
+                  cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 0), 2);
     }
+
+    // Publish
+    sensor_msgs::msg::Image::SharedPtr out_msg =
+        cv_bridge::CvImage(msg->header, sensor_msgs::image_encodings::BGR8,
+                           display)
+            .toImageMsg();
+    image_pub_->publish(*out_msg);
   }
 
-  // ===== Calibration: camera pitch estimation =====
-  enum class State { CalibratePitch, Localize };
-
-  void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
-    if (msg->k.size() >= 9) {
-      fx_ = msg->k[0];
-      fy_ = msg->k[4];
-      cx_ = msg->k[2];
-      cy_ = msg->k[5];
-      has_cam_info_ = true;
-    } else if (msg->p.size() >= 12) {
-      fx_ = msg->p[0];
-      fy_ = msg->p[5];
-      cx_ = msg->p[2];
-      cy_ = msg->p[6];
-      has_cam_info_ = true;
-    }
-  }
-
-  bool detect_landmark_center(const cv::Mat &work_img, const cv::Rect &roi,
-                              double scale, double &x_full_out,
-                              double &v_full_out) {
-    if (work_img.empty()) return false;
-    cv::Mat work_bgr;
-    if (work_img.channels() == 1) {
-      cv::cvtColor(work_img, work_bgr, cv::COLOR_GRAY2BGR);
-    } else {
-      work_bgr = work_img;
-    }
-    // HSV gray mask: low saturation, mid brightness
-    cv::Mat hsv;
-    cv::cvtColor(work_bgr, hsv, cv::COLOR_BGR2HSV);
-    cv::Mat mask;
-    cv::inRange(hsv, cv::Scalar(0, 0, calib_hsv_v_min_),
-                cv::Scalar(180, calib_hsv_s_max_, calib_hsv_v_max_), mask);
-    cv::medianBlur(mask, mask, 5);
-    cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-    // Open then Close to clean noise and fill the disk
-    cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
-    cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
-
-    // Store processed HSV mask for debug visualization
-    last_calib_hsv_mask_ = mask.clone();
-
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask, contours, cv::RETR_EXTERNAL,
-                     cv::CHAIN_APPROX_SIMPLE);
-
-    auto work_center = cv::Point2f(static_cast<float>(work_bgr.cols) / 2.0f,
-                                   static_cast<float>(work_bgr.rows) / 2.0f);
-    bool found = false;
-    cv::RotatedRect best_ellipse;
-    double best_score = std::numeric_limits<double>::infinity();
-    const double max_major =
-        calib_max_major_ratio_ *
-        static_cast<double>(std::min(work_bgr.cols, work_bgr.rows));
-    for (const auto &cnt : contours) {
-      if (cnt.size() < 5) continue;
-      double area = cv::contourArea(cnt);
-      if (area < static_cast<double>(calib_min_area_)) continue;
-      cv::RotatedRect e = cv::fitEllipse(cnt);
-      // Normalize so 'major' is along angle
-      double width = e.size.width, height = e.size.height;
-      double angle_deg = e.angle;
-      if (width < height) {
-        std::swap(width, height);
-        angle_deg += 90.0;
-      }
-      while (angle_deg < 0.0) angle_deg += 180.0;
-      while (angle_deg >= 180.0) angle_deg -= 180.0;
-      double major = width / 2.0;
-      double minor = height / 2.0;
-      if (major <= 0.0 || minor <= 0.0) continue;
-      if (major < static_cast<double>(calib_min_major_px_)) continue;
-      if (major > max_major) continue;  // reject too large objects
-      double ratio = minor / major;
-      if (ratio < 0.2 || ratio > 1.25) continue;  // plausible ellipse
-
-      // Grayness inside ellipse (prefer low S, mid V)
-      cv::Mat ell_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
-      cv::ellipse(ell_mask, e, cv::Scalar(255), -1);
-      cv::Scalar mean_hsv = cv::mean(hsv, ell_mask);
-      double mean_s = mean_hsv[1];
-      double mean_v = mean_hsv[2];
-      // Hard reject if interior is too dark (likely black line)
-      if (mean_v < static_cast<double>(calib_hsv_v_min_) + 10.0) continue;
-      // Fill ratio: mask pixels inside ellipse vs ellipse area
-      cv::Mat mask_inside;
-      cv::bitwise_and(mask, ell_mask, mask_inside);
-      const double ellipse_area = CV_PI * major * minor;
-      const double fill =
-          ellipse_area > 1.0
-              ? static_cast<double>(cv::countNonZero(mask_inside)) /
-                    ellipse_area
-              : 0.0;
-      if (fill < calib_fill_min_) continue;
-      double v_target = 0.5 * (static_cast<double>(calib_hsv_v_min_) +
-                               static_cast<double>(calib_hsv_v_max_));
-
-      // Scoring: center distance + size + angle preference + grayness penalties
-      double d = cv::norm(e.center - work_center);
-      double angle_pen =
-          std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
-      // We prefer horizontal major axis (squashed vertically) -> angle near
-      // 0/180
-      double score = 0.0;
-      score += d;                // center proximity
-      score += 0.05 * major;     // size penalty
-      score += 0.2 * angle_pen;  // orientation preference
-      score +=
-          0.10 * std::max(0.0, mean_s - static_cast<double>(calib_hsv_s_max_));
-      score += 0.002 * std::abs(mean_v - v_target);
-      // Record candidate for visualization (mapped to full image coords)
-      cv::RotatedRect e_full(
-          cv::Point2f(static_cast<float>(e.center.x * scale + roi.x),
-                      static_cast<float>(e.center.y * scale + roi.y)),
-          cv::Size2f(static_cast<float>(e.size.width * scale),
-                     static_cast<float>(e.size.height * scale)),
-          e.angle);
-      if (score < best_score) {
-        best_score = score;
-        best_ellipse = e;
-        found = true;
-      }
-    }
-
-    // Edge-based fallback within HSV mask region
-    if (!found) {
-      cv::Mat gray;
-      cv::cvtColor(work_bgr, gray, cv::COLOR_BGR2GRAY);
-      cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.2);
-      cv::Mat edges;
-      cv::Canny(gray, edges, 60, 180, 3, true);
-      cv::bitwise_and(edges, mask, edges);
-      cv::Mat kd = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
-      cv::dilate(edges, edges, kd);
-      std::vector<std::vector<cv::Point>> ctr2;
-      cv::findContours(edges, ctr2, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
-      for (const auto &cnt : ctr2) {
-        if (cnt.size() < 20) continue;
-        double area2 = cv::contourArea(cnt);
-        if (area2 < 60.0) continue;
-        if (cnt.size() >= 5) {
-          cv::RotatedRect e = cv::fitEllipse(cnt);
-          double major = std::max(e.size.width, e.size.height) / 2.0;
-          double minor = std::min(e.size.width, e.size.height) / 2.0;
-          if (major <= 0.0 || minor <= 0.0) continue;
-          if (major > max_major) continue;
-          double ratio2 = minor / major;
-          if (ratio2 < 0.2 || ratio2 > 1.3) continue;
-          double d = cv::norm(e.center - work_center);
-          double score = d + 0.12 * major;
-          if (score < best_score) {
-            best_score = score;
-            best_ellipse = e;
-            found = true;
-          }
-        }
-      }
-    }
-
-    if (!found) return false;
-
-    // Recompute metrics for the selected ellipse (in work coordinates)
-    double sel_width = best_ellipse.size.width;
-    double sel_height = best_ellipse.size.height;
-    double sel_angle_deg = best_ellipse.angle;
-    if (sel_width < sel_height) {
-      std::swap(sel_width, sel_height);
-      sel_angle_deg += 90.0;
-    }
-    while (sel_angle_deg < 0.0) sel_angle_deg += 180.0;
-    while (sel_angle_deg >= 180.0) sel_angle_deg -= 180.0;
-    double sel_major = sel_width / 2.0;
-    double sel_minor = sel_height / 2.0;
-    cv::Mat sel_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
-    cv::ellipse(sel_mask, best_ellipse, cv::Scalar(255), -1);
-    cv::Scalar sel_mean_hsv = cv::mean(hsv, sel_mask);
-    last_mean_s_ = sel_mean_hsv[1];
-    last_mean_v_ = sel_mean_hsv[2];
-    last_ratio_ = (sel_major > 1e-9) ? (sel_minor / sel_major) : 0.0;
-    last_angle_deg_ = sel_angle_deg;
-    const double sel_area = CV_PI * sel_major * sel_minor;
-    if (sel_area > 1.0) {
-      cv::Mat mask_inside;
-      cv::bitwise_and(mask, sel_mask, mask_inside);
-      last_fill_ =
-          static_cast<double>(cv::countNonZero(mask_inside)) / sel_area;
-    } else {
-      last_fill_ = 0.0;
-    }
-
-    // Map to full image coordinates
-    const double x_full =
-        static_cast<double>(best_ellipse.center.x) * scale + roi.x;
-    const double v_full =
-        static_cast<double>(best_ellipse.center.y) * scale + roi.y;
-    x_full_out = x_full;
-    v_full_out = v_full;
-    // Store last ellipse in full-res coordinates for overlay
-    last_ellipse_full_ = cv::RotatedRect(
-        cv::Point2f(static_cast<float>(x_full), static_cast<float>(v_full)),
-        cv::Size2f(static_cast<float>(best_ellipse.size.width * scale),
-                   static_cast<float>(best_ellipse.size.height * scale)),
-        best_ellipse.angle);
-    last_ellipse_valid_ = true;
-    return true;
-  }
-
-  static double median(std::vector<double> v) {
-    if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
-    const size_t n = v.size();
-    std::nth_element(v.begin(), v.begin() + n / 2, v.end());
-    double m = v[n / 2];
-    if ((n % 2) == 0) {
-      auto max_it = std::max_element(v.begin(), v.begin() + n / 2);
-      m = (m + *max_it) * 0.5;
-    }
-    return m;
-  }
-
-  void try_finalize_calibration() {
-    // Timeout check
-    if (calib_started_ && calib_timeout_sec_ > 0.0) {
-      const rclcpp::Duration elapsed = this->now() - calib_start_time_;
-      if (elapsed.seconds() >= calib_timeout_sec_) {
-        RCLCPP_WARN(this->get_logger(),
-                    "Calibration timeout after %.1fs. Proceed without pitch.",
-                    calib_timeout_sec_);
-        transition_to_ready(/*pitch_rad=*/0.0);
-        return;
-      }
-    }
-
-    if (!has_cam_info_) return;
-    if (v_samples_.size() < kMinCalibSamples) return;
-
-    const double v_med = median(v_samples_);
-    // Compute u = (v - cy)/fy
-    const double u = (v_med - cy_) / fy_;
-    const double D = landmark_distance_m_;
-    const double h = camera_height_m_;
-    // tan(theta) = (D*u - h) / (D + h*u)
-    const double denom = (D + h * u);
-    if (std::abs(denom) < 1e-6) return;  // avoid singularities
-    const double t = (D * u - h) / denom;
-    const double theta = std::atan(t);
-
-    // Sanity clamp to [-45, 45] deg
-    const double max_rad = deg2rad(45.0);
-    const double pitch_rad = std::max(-max_rad, std::min(theta, max_rad));
-    if (calib_timeout_sec_ == 0.0) {
-      // Continuous calibration mode: keep updating pitch and stay in this state
-      estimated_pitch_rad_ = pitch_rad;
-      return;
-    }
-    transition_to_ready(pitch_rad);
-  }
-
-  void transition_to_ready(double pitch_rad) {
-    estimated_pitch_rad_ = pitch_rad;
-
-    state_ = State::Localize;
-    RCLCPP_INFO(this->get_logger(),
-                "Calibration finished. Estimated pitch: %.2f deg (%.4f rad). "
-                "Transitioning to localization mode.",
-                rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
-  }
-
+ private:
   // ===== Localization: robot pose estimation using landmarks =====
-  void perform_localization(const std::vector<cv::Vec4i> &segments,
-                            const cv::Mat &img) {
+  void perform_localization(const std::vector<cv::Vec4i>& segments,
+                            const cv::Mat& img) {
     if (!has_cam_info_ || !std::isfinite(estimated_pitch_rad_)) {
       RCLCPP_WARN(this->get_logger(),
                   "Localization skipped: cam_info=%s, pitch_valid=%s",
@@ -1108,8 +631,8 @@ class LineDetectorNode : public rclcpp::Node {
 
     // Use same detection logic as calibration but without ROI restriction
     cv::Rect full_roi(0, 0, img.cols, img.rows);
-    if (detect_landmark_center(img, full_roi, 1.0, landmark_x_px,
-                               landmark_y_px)) {
+    if (calibrator_->detect_landmark_center(img, full_roi, 1.0, landmark_x_px,
+                                            landmark_y_px)) {
       landmark_found = true;
     } else {
       RCLCPP_WARN(this->get_logger(), "Landmark not found");
@@ -1142,8 +665,8 @@ class LineDetectorNode : public rclcpp::Node {
     }
   }
 
-  bool find_front_line(const std::vector<cv::Vec4i> &segments,
-                       cv::Vec4i &front_line) {
+  bool find_front_line(const std::vector<cv::Vec4i>& segments,
+                       cv::Vec4i& front_line) {
     if (segments.empty()) return false;
 
     // Find the line closest to the camera (lowest y-coordinate)
@@ -1151,7 +674,7 @@ class LineDetectorNode : public rclcpp::Node {
     double best_score = std::numeric_limits<double>::infinity();
     bool found = false;
 
-    for (const auto &line : segments) {
+    for (const auto& line : segments) {
       // Calculate line properties
       double dx = line[2] - line[0];
       double dy = line[3] - line[1];
@@ -1185,8 +708,8 @@ class LineDetectorNode : public rclcpp::Node {
   }
 
   bool calculate_robot_pose(double landmark_px_x, double landmark_px_y,
-                            const cv::Vec4i &front_line, double &robot_x,
-                            double &robot_y, double &robot_yaw) {
+                            const cv::Vec4i& front_line, double& robot_x,
+                            double& robot_y, double& robot_yaw) {
     // Transform landmark pixel coordinates to world coordinates
     // Using the calibrated camera model and known landmark position
 
@@ -1293,17 +816,19 @@ class LineDetectorNode : public rclcpp::Node {
   int hsv_dilate_kernel_{};
   int hsv_dilate_iter_{};
 
-  // Calibration / camera model
-  State state_{State::CalibratePitch};
+  // Camera model (for localization)
+  State state_{State::Calibrating};
   bool has_cam_info_{false};
   double fx_{};
   double fy_{};
   double cx_{};
   double cy_{};
+
+  // Calibration parameters (kept for CameraCalibrator access)
   double camera_height_m_{};
   double landmark_distance_m_{};
   double calib_timeout_sec_{};
-  std::vector<int64_t> calib_roi_{};  // optional [x,y,w,h] in full image
+  std::vector<int64_t> calib_roi_{};
   int calib_hsv_s_max_{};
   int calib_hsv_v_min_{};
   int calib_hsv_v_max_{};
@@ -1323,23 +848,8 @@ class LineDetectorNode : public rclcpp::Node {
   double last_robot_yaw_{};
 
   double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
-  bool calib_started_{false};
-  rclcpp::Time calib_start_time_{};
-  std::vector<double> v_samples_{};
-  static constexpr size_t kMinCalibSamples = 10;
-  static constexpr size_t kMaxCalibSamples = 30;
-  bool last_circle_valid_{false};
-  cv::Point2d last_circle_px_{};
-  bool last_ellipse_valid_{false};
-  cv::RotatedRect last_ellipse_full_{};
-  // Selected landmark metrics (for overlay)
-  double last_angle_deg_{};
-  double last_ratio_{};
-  double last_mean_s_{};
-  double last_mean_v_{};
-  double last_fill_{};
-  // HSV mask for debug visualization
-  cv::Mat last_calib_hsv_mask_;
+
+  std::unique_ptr<CameraCalibrator> calibrator_;
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
@@ -1353,7 +863,347 @@ class LineDetectorNode : public rclcpp::Node {
   std::mutex param_mutex_;
 };
 
-int main(int argc, char **argv) {
+// ===== CameraCalibrator Implementation =====
+CameraCalibrator::CameraCalibrator(LineDetectorNode* node) : node_(node) {
+  // Initialize calibration state
+  calib_started_ = false;
+  calibration_complete_ = false;
+  estimated_pitch_rad_ = std::numeric_limits<double>::quiet_NaN();
+
+  // Landmark detection state
+  last_circle_valid_ = false;
+  last_ellipse_valid_ = false;
+  last_mean_s_ = 0.0;
+  last_mean_v_ = 0.0;
+  last_ratio_ = 0.0;
+  last_angle_deg_ = 0.0;
+  last_fill_ = 0.0;
+
+  // Cache parameters from node
+  camera_height_m_ = node_->camera_height_m_;
+  landmark_distance_m_ = node_->landmark_distance_m_;
+  calib_timeout_sec_ = node_->calib_timeout_sec_;
+  calib_roi_ = node_->calib_roi_;
+  calib_hsv_s_max_ = node_->calib_hsv_s_max_;
+  calib_hsv_v_min_ = node_->calib_hsv_v_min_;
+  calib_hsv_v_max_ = node_->calib_hsv_v_max_;
+  calib_min_area_ = node_->calib_min_area_;
+  calib_min_major_px_ = node_->calib_min_major_px_;
+  calib_max_major_ratio_ = node_->calib_max_major_ratio_;
+  calib_fill_min_ = node_->calib_fill_min_;
+
+  // Start calibration timer if timeout is enabled
+  if (calib_timeout_sec_ > 0.0) {
+    calib_start_time_ = node_->now();
+    calib_started_ = true;
+  }
+}
+
+bool CameraCalibrator::process_frame(const cv::Mat& img) {
+  if (calibration_complete_) {
+    return true;  // Already completed
+  }
+
+  // Detect landmark center in the calibration ROI
+  cv::Rect calib_rect = valid_roi(img, calib_roi_);
+
+  // Extract work region (apply scaling if needed)
+  cv::Mat work = img(calib_rect).clone();
+  const double scale = 1.0;  // No scaling currently
+
+  double x_full_out, v_full_out;
+  if (detect_landmark_center(work, calib_rect, scale, x_full_out, v_full_out)) {
+    // Valid detection: store v coordinate
+    v_samples_.push_back(v_full_out);
+
+    // Store circle/ellipse data for visualization
+    last_circle_px_ = cv::Point2d(x_full_out, v_full_out);
+    last_circle_valid_ = true;
+
+    // Try to finalize calibration
+    try_finalize_calibration();
+  }
+
+  return calibration_complete_;
+}
+
+cv::Rect CameraCalibrator::valid_roi(const cv::Mat& img,
+                                     const std::vector<int64_t>& roi) {
+  if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
+  int x = static_cast<int>(roi[0]);
+  int y = static_cast<int>(roi[1]);
+  int w = static_cast<int>(roi[2]);
+  int h = static_cast<int>(roi[3]);
+  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+    return cv::Rect(0, 0, img.cols, img.rows);
+  }
+  x = std::max(0, std::min(x, img.cols - 1));
+  y = std::max(0, std::min(y, img.rows - 1));
+  w = std::min(w, img.cols - x);
+  h = std::min(h, img.rows - y);
+  return cv::Rect(x, y, w, h);
+}
+
+bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
+                                              const cv::Rect& roi, double scale,
+                                              double& x_full_out,
+                                              double& v_full_out) {
+  if (work_img.empty()) return false;
+
+  cv::Mat work_bgr;
+  if (work_img.channels() == 1) {
+    cv::cvtColor(work_img, work_bgr, cv::COLOR_GRAY2BGR);
+  } else {
+    work_bgr = work_img;
+  }
+
+  // HSV gray mask: low saturation, mid brightness
+  cv::Mat hsv;
+  cv::cvtColor(work_bgr, hsv, cv::COLOR_BGR2HSV);
+  cv::Mat mask;
+  cv::inRange(hsv, cv::Scalar(0, 0, calib_hsv_v_min_),
+              cv::Scalar(180, calib_hsv_s_max_, calib_hsv_v_max_), mask);
+
+  cv::medianBlur(mask, mask, 5);
+  cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+  // Open then Close to clean noise and fill the disk
+  cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
+  cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
+
+  // Store processed HSV mask for debug visualization
+  last_calib_hsv_mask_ = mask.clone();
+
+  std::vector<std::vector<cv::Point>> contours;
+  cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+  auto work_center = cv::Point2f(static_cast<float>(work_bgr.cols) / 2.0f,
+                                 static_cast<float>(work_bgr.rows) / 2.0f);
+  bool found = false;
+  cv::RotatedRect best_ellipse;
+  double best_score = std::numeric_limits<double>::infinity();
+  const double max_major =
+      calib_max_major_ratio_ *
+      static_cast<double>(std::min(work_bgr.cols, work_bgr.rows));
+
+  for (const auto& cnt : contours) {
+    if (cnt.size() < 5) continue;
+    double area = cv::contourArea(cnt);
+    if (area < static_cast<double>(calib_min_area_)) continue;
+
+    cv::RotatedRect e = cv::fitEllipse(cnt);
+
+    // Normalize so 'major' is along angle
+    double width = e.size.width, height = e.size.height;
+    double angle_deg = e.angle;
+    if (width < height) {
+      std::swap(width, height);
+      angle_deg += 90.0;
+    }
+    while (angle_deg < 0.0) angle_deg += 180.0;
+    while (angle_deg >= 180.0) angle_deg -= 180.0;
+
+    double major = width / 2.0;
+    double minor = height / 2.0;
+    if (major <= 0.0 || minor <= 0.0) continue;
+    if (major < static_cast<double>(calib_min_major_px_)) continue;
+    if (major > max_major) continue;  // reject too large objects
+
+    double ratio = minor / major;
+    if (ratio < 0.2 || ratio > 1.25) continue;  // plausible ellipse
+
+    // Grayness inside ellipse (prefer low S, mid V)
+    cv::Mat ell_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
+    cv::ellipse(ell_mask, e, cv::Scalar(255), -1);
+    cv::Scalar mean_hsv = cv::mean(hsv, ell_mask);
+    double mean_s = mean_hsv[1];
+    double mean_v = mean_hsv[2];
+
+    // Hard reject if interior is too dark (likely black line)
+    if (mean_v < static_cast<double>(calib_hsv_v_min_) + 10.0) continue;
+
+    // Fill ratio: mask pixels inside ellipse vs ellipse area
+    cv::Mat mask_inside;
+    cv::bitwise_and(mask, ell_mask, mask_inside);
+    const double ellipse_area = CV_PI * major * minor;
+    const double fill =
+        ellipse_area > 1.0
+            ? static_cast<double>(cv::countNonZero(mask_inside)) / ellipse_area
+            : 0.0;
+
+    if (fill < calib_fill_min_) continue;
+
+    double v_target = 0.5 * (static_cast<double>(calib_hsv_v_min_) +
+                             static_cast<double>(calib_hsv_v_max_));
+
+    // Scoring: center distance + size + angle preference + grayness penalties
+    double d = cv::norm(e.center - work_center);
+    double angle_pen =
+        std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
+    // We prefer horizontal major axis (squashed vertically) -> angle near 0/180
+    double score = 0.0;
+    score += d;                // center proximity
+    score += 0.05 * major;     // size penalty
+    score += 0.2 * angle_pen;  // orientation preference
+    score +=
+        0.10 * std::max(0.0, mean_s - static_cast<double>(calib_hsv_s_max_));
+    score += 0.002 * std::abs(mean_v - v_target);
+
+    if (score < best_score) {
+      best_score = score;
+      best_ellipse = e;
+      found = true;
+    }
+  }
+
+  // Edge-based fallback within HSV mask region
+  if (!found) {
+    cv::Mat gray;
+    cv::cvtColor(work_bgr, gray, cv::COLOR_BGR2GRAY);
+    cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.2);
+    cv::Mat edges;
+    cv::Canny(gray, edges, 60, 180, 3, true);
+    cv::bitwise_and(edges, mask, edges);
+    cv::Mat kd = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+    cv::dilate(edges, edges, kd);
+
+    std::vector<std::vector<cv::Point>> ctr2;
+    cv::findContours(edges, ctr2, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+
+    for (const auto& cnt : ctr2) {
+      if (cnt.size() < 20) continue;
+      double area2 = cv::contourArea(cnt);
+      if (area2 < 60.0) continue;
+
+      if (cnt.size() >= 5) {
+        cv::RotatedRect e = cv::fitEllipse(cnt);
+        double major = std::max(e.size.width, e.size.height) / 2.0;
+        double minor = std::min(e.size.width, e.size.height) / 2.0;
+        if (major <= 0.0 || minor <= 0.0) continue;
+        if (major > max_major) continue;
+
+        double ratio2 = minor / major;
+        if (ratio2 < 0.2 || ratio2 > 1.3) continue;
+
+        double d = cv::norm(e.center - work_center);
+        double score = d + 0.12 * major;
+
+        if (score < best_score) {
+          best_score = score;
+          best_ellipse = e;
+          found = true;
+        }
+      }
+    }
+  }
+
+  if (!found) return false;
+
+  // Recompute metrics for the selected ellipse (in work coordinates)
+  double sel_width = best_ellipse.size.width;
+  double sel_height = best_ellipse.size.height;
+  double sel_angle_deg = best_ellipse.angle;
+  if (sel_width < sel_height) {
+    std::swap(sel_width, sel_height);
+    sel_angle_deg += 90.0;
+  }
+  while (sel_angle_deg < 0.0) sel_angle_deg += 180.0;
+  while (sel_angle_deg >= 180.0) sel_angle_deg -= 180.0;
+
+  double sel_major = sel_width / 2.0;
+  double sel_minor = sel_height / 2.0;
+  cv::Mat sel_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
+  cv::ellipse(sel_mask, best_ellipse, cv::Scalar(255), -1);
+  cv::Scalar sel_mean_hsv = cv::mean(hsv, sel_mask);
+
+  last_mean_s_ = sel_mean_hsv[1];
+  last_mean_v_ = sel_mean_hsv[2];
+  last_ratio_ = (sel_major > 1e-9) ? (sel_minor / sel_major) : 0.0;
+  last_angle_deg_ = sel_angle_deg;
+
+  const double sel_area = CV_PI * sel_major * sel_minor;
+  if (sel_area > 1.0) {
+    cv::Mat mask_inside;
+    cv::bitwise_and(mask, sel_mask, mask_inside);
+    last_fill_ = static_cast<double>(cv::countNonZero(mask_inside)) / sel_area;
+  } else {
+    last_fill_ = 0.0;
+  }
+
+  // Map to full image coordinates
+  const double x_full =
+      static_cast<double>(best_ellipse.center.x) * scale + roi.x;
+  const double v_full =
+      static_cast<double>(best_ellipse.center.y) * scale + roi.y;
+  x_full_out = x_full;
+  v_full_out = v_full;
+
+  // Store last ellipse in full-res coordinates for overlay
+  last_ellipse_full_ = cv::RotatedRect(
+      cv::Point2f(static_cast<float>(x_full), static_cast<float>(v_full)),
+      cv::Size2f(static_cast<float>(best_ellipse.size.width * scale),
+                 static_cast<float>(best_ellipse.size.height * scale)),
+      best_ellipse.angle);
+  last_ellipse_valid_ = true;
+
+  return true;
+}
+
+void CameraCalibrator::try_finalize_calibration() {
+  // Timeout check
+  if (calib_started_ && calib_timeout_sec_ > 0.0) {
+    const rclcpp::Duration elapsed = node_->now() - calib_start_time_;
+    if (elapsed.seconds() >= calib_timeout_sec_) {
+      RCLCPP_WARN(node_->get_logger(),
+                  "Calibration timeout after %.1fs. Proceed without pitch.",
+                  calib_timeout_sec_);
+      estimated_pitch_rad_ = 0.0;
+      calibration_complete_ = true;
+      return;
+    }
+  }
+
+  if (!node_->has_cam_info_) return;
+  if (v_samples_.size() < kMinCalibSamples) return;
+
+  const double v_med = median(v_samples_);
+  // Compute u = (v - cy)/fy
+  const double u = (v_med - node_->cy_) / node_->fy_;
+  const double D = landmark_distance_m_;
+  const double h = camera_height_m_;
+  // tan(theta) = (D*u - h) / (D + h*u)
+  const double denom = (D + h * u);
+  if (std::abs(denom) < 1e-6) return;  // avoid singularities
+
+  const double t = (D * u - h) / denom;
+  const double theta = std::atan(t);
+
+  // Sanity clamp to [-45, 45] deg
+  const double max_rad = deg2rad(45.0);
+  const double pitch_rad = std::max(-max_rad, std::min(theta, max_rad));
+
+  if (calib_timeout_sec_ == 0.0) {
+    // Continuous calibration mode: keep updating pitch and stay in this state
+    estimated_pitch_rad_ = pitch_rad;
+    return;
+  }
+
+  estimated_pitch_rad_ = pitch_rad;
+  calibration_complete_ = true;
+}
+
+double CameraCalibrator::median(std::vector<double> v) {
+  if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
+  const size_t n = v.size();
+  std::nth_element(v.begin(), v.begin() + n / 2, v.end());
+  double m = v[n / 2];
+  if ((n % 2) == 0) {
+    auto max_it = std::max_element(v.begin(), v.begin() + n / 2);
+    m = (m + *max_it) * 0.5;
+  }
+  return m;
+}
+
+int main(int argc, char** argv) {
   rclcpp::init(argc, argv);
   rclcpp::spin(std::make_shared<LineDetectorNode>());
   rclcpp::shutdown();
