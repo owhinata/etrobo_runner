@@ -4,10 +4,8 @@
 
 #include <chrono>
 #include <cmath>
-#include <geometry_msgs/msg/point.hpp>
 #include <mutex>
 #include <opencv2/core.hpp>
-#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <rclcpp/qos.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -17,9 +15,12 @@
 #include <std_msgs/msg/float32_multi_array.hpp>
 #include <string>
 #include <vector>
-#include <visualization_msgs/msg/marker_array.hpp>
 
 using std::placeholders::_1;
+
+// Small helpers for angle conversion
+static inline double deg2rad(double deg) { return deg * CV_PI / 180.0; }
+static inline double rad2deg(double rad) { return rad * 180.0 / CV_PI; }
 
 class LineDetectorNode : public rclcpp::Node {
  public:
@@ -212,16 +213,16 @@ class LineDetectorNode : public rclcpp::Node {
     std::vector<cv::Vec4i> segments;
     if (hough_type_ == "standard") {
       std::vector<cv::Vec2f> lines;
-      double theta = theta_deg_ * CV_PI / 180.0;
+      double theta = deg2rad(theta_deg_);
       cv::HoughLines(edges, lines, rho_, theta, threshold_);
-      double min_tr = min_theta_deg_ * CV_PI / 180.0;
-      double max_tr = max_theta_deg_ * CV_PI / 180.0;
+      double min_tr = deg2rad(min_theta_deg_);
+      double max_tr = deg2rad(max_theta_deg_);
       segments = hough_standard_to_segments(lines, edges.cols, edges.rows,
                                             min_tr, max_tr);
     } else {
       // probabilistic default
-      cv::HoughLinesP(edges, segments, rho_, theta_deg_ * CV_PI / 180.0,
-                      threshold_, min_line_length_, max_line_gap_);
+      cv::HoughLinesP(edges, segments, rho_, deg2rad(theta_deg_), threshold_,
+                      min_line_length_, max_line_gap_);
     }
     return segments;
   }
@@ -251,15 +252,10 @@ class LineDetectorNode : public rclcpp::Node {
 
     // If show_edges is enabled, display edge image instead of original
     if (show_edges_) {
-      // Scale up edges to original image size
-      cv::Mat edges_full;
-      cv::resize(edges, edges_full, cv::Size(roi_rect.width, roi_rect.height),
-                 0, 0, cv::INTER_NEAREST);
-
-      // Create full-size edge image
+      // Create full-size edge image and paste ROI-sized edges directly
       cv::Mat edges_original =
           cv::Mat::zeros(original_img.rows, original_img.cols, CV_8UC1);
-      edges_full.copyTo(edges_original(roi_rect));
+      edges.copyTo(edges_original(roi_rect));
 
       // Convert to BGR for visualization
       cv::cvtColor(edges_original, vis, cv::COLOR_GRAY2BGR);
@@ -347,8 +343,7 @@ class LineDetectorNode : public rclcpp::Node {
           // Overlay text with distance and pitch
           char buf[128];
           std::snprintf(buf, sizeof(buf), "D=%.2fm, pitch=%.2f deg",
-                        landmark_distance_m_,
-                        estimated_pitch_rad_ * 180.0 / CV_PI);
+                        landmark_distance_m_, rad2deg(estimated_pitch_rad_));
           int baseline = 0;
           cv::Size txt =
               cv::getTextSize(buf, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
@@ -437,7 +432,7 @@ class LineDetectorNode : public rclcpp::Node {
     lines_msg.layout.dim.resize(1);
     lines_msg.layout.dim[0].label = "lines_flat_xyxy";
     lines_msg.layout.dim[0].size = segments.size() * 4;
-    lines_msg.layout.dim[0].stride = 1;
+    lines_msg.layout.dim[0].stride = lines_msg.layout.dim[0].size;
     lines_msg.data.reserve(segments.size() * 4);
     for (const auto &l : segments) {
       lines_msg.data.push_back(static_cast<float>(l[0]));
@@ -649,7 +644,6 @@ class LineDetectorNode : public rclcpp::Node {
       pt2.y = static_cast<float>(y0 - 10000 * (a));
 
       // Clip the segment to image rectangle
-      std::vector<cv::Point2f> points = {pt1, pt2};
       // Liang–Barsky would be ideal; OpenCV clipLine works for ints
       cv::Point p1(cvRound(pt1.x), cvRound(pt1.y));
       cv::Point p2(cvRound(pt2.x), cvRound(pt2.y));
@@ -662,6 +656,9 @@ class LineDetectorNode : public rclcpp::Node {
 
   void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg) {
     const auto t0 = std::chrono::steady_clock::now();
+
+    // Guard concurrent parameter updates during frame processing
+    std::lock_guard<std::mutex> param_lock(param_mutex_);
 
     // Initialize calibration timer on first frame
     if (!calib_started_) {
@@ -995,7 +992,7 @@ class LineDetectorNode : public rclcpp::Node {
     const double theta = std::atan(t);
 
     // Sanity clamp to [-45, 45] deg
-    const double max_rad = 45.0 * CV_PI / 180.0;
+    const double max_rad = deg2rad(45.0);
     const double pitch_rad = std::max(-max_rad, std::min(theta, max_rad));
     if (calib_timeout_sec_ == 0.0) {
       // Continuous calibration mode: keep updating pitch and stay in this state
@@ -1011,7 +1008,7 @@ class LineDetectorNode : public rclcpp::Node {
 
     RCLCPP_INFO(this->get_logger(),
                 "Calibration finished. Estimated pitch: %.2f deg (%.4f rad)",
-                estimated_pitch_rad_ * 180.0 / CV_PI, estimated_pitch_rad_);
+                rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
   }
 
   // Parameters
