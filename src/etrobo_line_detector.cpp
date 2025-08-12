@@ -100,6 +100,12 @@ class LineDetectorNode : public rclcpp::Node {
     calib_max_major_ratio_ =
         this->declare_parameter<double>("calib_max_major_ratio", 0.65);
     calib_fill_min_ = this->declare_parameter<double>("calib_fill_min", 0.25);
+
+    // Localization parameters
+    enable_localization_ =
+        this->declare_parameter<bool>("enable_localization", true);
+    landmark_map_x_ = this->declare_parameter<double>("landmark_map_x", -0.409);
+    landmark_map_y_ = this->declare_parameter<double>("landmark_map_y", 1.0);
   }
 
   void setup_publishers() {
@@ -420,6 +426,54 @@ class LineDetectorNode : public rclcpp::Node {
       }
     }
 
+    // Show localization information during localization mode
+    if (state_ == State::Localize && localization_valid_) {
+      cv::Scalar info_color(0, 255, 255);  // yellow
+      cv::Scalar bg_color(128, 128, 128);  // gray
+
+      // Display robot pose information
+      char pose_buf[128];
+      std::snprintf(pose_buf, sizeof(pose_buf),
+                    "Robot: x=%.2f, y=%.2f, yaw=%.1f deg", last_robot_x_,
+                    last_robot_y_, rad2deg(last_robot_yaw_));
+
+      int baseline = 0;
+      cv::Size pose_text_size = cv::getTextSize(
+          pose_buf, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+      cv::Point pose_org(10, vis.rows - 30);
+
+      // Semi-transparent gray background
+      cv::Mat overlay;
+      vis.copyTo(overlay);
+      cv::rectangle(
+          overlay, pose_org + cv::Point(0, baseline),
+          pose_org + cv::Point(pose_text_size.width, -pose_text_size.height),
+          bg_color, cv::FILLED);
+      cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
+
+      cv::putText(vis, pose_buf, pose_org, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+                  info_color, 1);
+
+      // Display landmark map coordinates
+      char landmark_buf[128];
+      std::snprintf(landmark_buf, sizeof(landmark_buf),
+                    "Landmark: (%.3f, %.3f)", landmark_map_x_, landmark_map_y_);
+
+      cv::Size landmark_text_size = cv::getTextSize(
+          landmark_buf, cv::FONT_HERSHEY_SIMPLEX, 0.4, 1, &baseline);
+      cv::Point landmark_org(10, vis.rows - 10);
+
+      vis.copyTo(overlay);
+      cv::rectangle(overlay, landmark_org + cv::Point(0, baseline),
+                    landmark_org + cv::Point(landmark_text_size.width,
+                                             -landmark_text_size.height),
+                    bg_color, cv::FILLED);
+      cv::addWeighted(vis, 0.7, overlay, 0.3, 0, vis);
+
+      cv::putText(vis, landmark_buf, landmark_org, cv::FONT_HERSHEY_SIMPLEX,
+                  0.4, info_color, 1);
+    }
+
     cv_bridge::CvImage out_img;
     out_img.header = header;
     out_img.encoding = sensor_msgs::image_encodings::BGR8;
@@ -596,6 +650,13 @@ class LineDetectorNode : public rclcpp::Node {
           calib_max_major_ratio_ = p.as_double();
         else if (name == "calib_fill_min")
           calib_fill_min_ = p.as_double();
+        // Localization params
+        else if (name == "enable_localization")
+          enable_localization_ = p.as_bool();
+        else if (name == "landmark_map_x")
+          landmark_map_x_ = p.as_double();
+        else if (name == "landmark_map_y")
+          landmark_map_y_ = p.as_double();
       } catch (const std::exception &e) {
         result.successful = false;
         result.reason = e.what();
@@ -688,8 +749,25 @@ class LineDetectorNode : public rclcpp::Node {
     // Step 6: Publish results
     std_msgs::msg::Header header = msg->header;
     publish_visualization(segments_out, img, edges, roi_rect, header);
-    if (state_ == State::Ready) {
+    if (state_ == State::Ready || state_ == State::Localize) {
       publish_lines_data(segments_out);
+    }
+
+    // Localization mode processing (estimate robot pose using landmarks)
+    if (state_ == State::Localize) {
+      perform_localization(segments_out, img);
+    } else {
+      // Debug: Log current state every 100 frames to avoid spam
+      static int frame_count = 0;
+      frame_count++;
+      if (frame_count % 100 == 0) {
+        const char *state_str = (state_ == State::CalibratePitch)
+                                    ? "CalibratePitch"
+                                : (state_ == State::Ready) ? "Ready"
+                                                           : "Unknown";
+        RCLCPP_INFO(this->get_logger(),
+                    "Current state: %s (not in Localize mode)", state_str);
+      }
     }
 
     // Calibration mode processing (detect gray circle and estimate pitch)
@@ -739,12 +817,19 @@ class LineDetectorNode : public rclcpp::Node {
         std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
             t1 - t0)
             .count();
-    RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
-                segments_out.size(), ms);
+
+    if (state_ == State::Localize && localization_valid_) {
+      RCLCPP_INFO(this->get_logger(),
+                  "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
+                  last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
+                  segments_out.size(), ms);
+    }
   }
 
   // ===== Calibration: camera pitch estimation =====
-  enum class State { CalibratePitch, Ready };
+  enum class State { CalibratePitch, Ready, Localize };
 
   void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
     if (msg->k.size() >= 9) {
@@ -1004,11 +1089,190 @@ class LineDetectorNode : public rclcpp::Node {
 
   void transition_to_ready(double pitch_rad) {
     estimated_pitch_rad_ = pitch_rad;
-    state_ = State::Ready;
 
     RCLCPP_INFO(this->get_logger(),
-                "Calibration finished. Estimated pitch: %.2f deg (%.4f rad)",
-                rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
+                "transition_to_ready: enable_localization_=%s",
+                enable_localization_ ? "true" : "false");
+
+    if (enable_localization_) {
+      state_ = State::Localize;
+      RCLCPP_INFO(this->get_logger(),
+                  "Calibration finished. Estimated pitch: %.2f deg (%.4f rad). "
+                  "Transitioning to localization mode.",
+                  rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
+    } else {
+      state_ = State::Ready;
+      RCLCPP_INFO(this->get_logger(),
+                  "Calibration finished. Estimated pitch: %.2f deg (%.4f rad)",
+                  rad2deg(estimated_pitch_rad_), estimated_pitch_rad_);
+    }
+  }
+
+  // ===== Localization: robot pose estimation using landmarks =====
+  void perform_localization(const std::vector<cv::Vec4i> &segments,
+                            const cv::Mat &img) {
+    if (!has_cam_info_ || !std::isfinite(estimated_pitch_rad_)) {
+      RCLCPP_WARN(this->get_logger(),
+                  "Localization skipped: cam_info=%s, pitch_valid=%s",
+                  has_cam_info_ ? "true" : "false",
+                  std::isfinite(estimated_pitch_rad_) ? "true" : "false");
+      return;
+    }
+
+    // Step 1: Detect gray disk landmark (reuse calibration detection)
+    double landmark_x_px = 0.0, landmark_y_px = 0.0;
+    bool landmark_found = false;
+
+    // Use same detection logic as calibration but without ROI restriction
+    cv::Rect full_roi(0, 0, img.cols, img.rows);
+    if (detect_landmark_center(img, full_roi, 1.0, landmark_x_px,
+                               landmark_y_px)) {
+      landmark_found = true;
+    } else {
+      RCLCPP_WARN(this->get_logger(), "Landmark not found");
+    }
+
+    // Step 2: Find the front line (closest to camera, nearly vertical)
+    cv::Vec4i front_line;
+    bool front_line_found = find_front_line(segments, front_line);
+
+    if (!front_line_found) {
+      RCLCPP_WARN(this->get_logger(), "Front line not found (total lines: %zu)",
+                  segments.size());
+    }
+
+    // Step 3: Calculate robot pose if both landmarks are detected
+    if (landmark_found && front_line_found) {
+      double robot_x, robot_y, robot_yaw;
+      if (calculate_robot_pose(landmark_x_px, landmark_y_px, front_line,
+                               robot_x, robot_y, robot_yaw)) {
+        // Store for visualization (no logging here)
+        last_robot_x_ = robot_x;
+        last_robot_y_ = robot_y;
+        last_robot_yaw_ = robot_yaw;
+        localization_valid_ = true;
+      } else {
+        RCLCPP_WARN(this->get_logger(), "Failed to calculate robot pose");
+      }
+    } else {
+      localization_valid_ = false;
+    }
+  }
+
+  bool find_front_line(const std::vector<cv::Vec4i> &segments,
+                       cv::Vec4i &front_line) {
+    if (segments.empty()) return false;
+
+    // Find the line closest to the camera (lowest y-coordinate)
+    // and most vertical (angle close to 90 degrees)
+    double best_score = std::numeric_limits<double>::infinity();
+    bool found = false;
+
+    for (const auto &line : segments) {
+      // Calculate line properties
+      double dx = line[2] - line[0];
+      double dy = line[3] - line[1];
+      double length = std::sqrt(dx * dx + dy * dy);
+
+      if (length < 50.0) continue;  // Skip very short lines
+
+      // Calculate angle from horizontal (0 = horizontal, 90 = vertical)
+      double angle_rad = std::atan2(std::abs(dx), std::abs(dy));
+      double angle_deg = rad2deg(angle_rad);
+
+      // Prefer nearly vertical lines (80-90 degrees)
+      if (angle_deg < 70.0) continue;
+
+      // Calculate distance to camera (use minimum y-coordinate)
+      double min_y = std::min(line[1], line[3]);
+
+      // Score: prefer closer lines (lower y) and more vertical lines
+      double angle_penalty = std::abs(90.0 - angle_deg) * 0.5;
+      double distance_penalty = min_y * 0.01;
+      double score = distance_penalty + angle_penalty;
+
+      if (score < best_score) {
+        best_score = score;
+        front_line = line;
+        found = true;
+      }
+    }
+
+    return found;
+  }
+
+  bool calculate_robot_pose(double landmark_px_x, double landmark_px_y,
+                            const cv::Vec4i &front_line, double &robot_x,
+                            double &robot_y, double &robot_yaw) {
+    // Transform landmark pixel coordinates to world coordinates
+    // Using the calibrated camera model and known landmark position
+
+    // Step 1: Convert landmark pixels to camera ray
+    double u_landmark = (landmark_px_x - cx_) / fx_;
+    double v_landmark = (landmark_px_y - cy_) / fy_;
+
+    // Step 2: Project ray to ground plane using estimated pitch
+    // The pitch is defined as rotation around x-axis (positive = looking up,
+    // negative = looking down)
+    double cos_pitch = std::cos(estimated_pitch_rad_);
+    double sin_pitch = std::sin(estimated_pitch_rad_);
+
+    // Ray direction in camera frame (z forward, y down, x right)
+    // For standard pinhole camera model: u = X/Z, v = Y/Z where (X,Y,Z) is 3D
+    // point in camera frame
+    double ray_x = u_landmark;  // X/Z
+    double ray_y = v_landmark;  // Y/Z
+    double ray_z = 1.0;         // Z/Z (normalized)
+
+    // Transform ray from camera frame to world frame
+    // Camera frame to world frame with correct orientation:
+    // Camera: z forward (into scene), y down, x right
+    // World: z down (toward ground), y forward, x right
+    // The camera is tilted down by |pitch| degrees
+
+    // Corrected transformation: map camera z to world -z (downward)
+    double world_ray_x = ray_x;
+    double world_ray_y = ray_y * cos_pitch + ray_z * sin_pitch;
+    double world_ray_z =
+        -ray_y * sin_pitch - ray_z * cos_pitch;  // Map to downward direction
+
+    // Intersect with ground plane (z = -camera_height_m_)
+    if (std::abs(world_ray_z) < 1e-6) {
+      return false;  // Ray parallel to ground
+    }
+
+    double t = -camera_height_m_ / world_ray_z;
+    if (t <= 0) {
+      return false;  // Ray pointing away from ground
+    }
+
+    double landmark_world_x = t * world_ray_x;
+    double landmark_world_y = t * world_ray_y;
+
+    // Step 3: Calculate front line orientation
+    double line_dx = front_line[2] - front_line[0];
+    double line_dy = front_line[3] - front_line[1];
+    double line_angle_image = std::atan2(
+        -line_dy, line_dx);  // Negative dy because image y increases downward
+
+    // The front line represents the map y-axis, so robot yaw is the angle of
+    // this line
+    robot_yaw = line_angle_image;
+
+    // Step 4: Calculate robot position
+    // Robot position is landmark map position minus camera-relative landmark
+    // position Rotated by robot yaw angle
+    double cos_yaw = std::cos(robot_yaw);
+    double sin_yaw = std::sin(robot_yaw);
+
+    // Transform landmark offset from robot frame to map frame
+    double offset_x = -landmark_world_x * cos_yaw + landmark_world_y * sin_yaw;
+    double offset_y = -landmark_world_x * sin_yaw - landmark_world_y * cos_yaw;
+
+    robot_x = landmark_map_x_ + offset_x;
+    robot_y = landmark_map_y_ + offset_y;
+
+    return true;
   }
 
   // Parameters
@@ -1064,6 +1328,18 @@ class LineDetectorNode : public rclcpp::Node {
   int calib_min_major_px_{};
   double calib_max_major_ratio_{};
   double calib_fill_min_{};
+
+  // Localization parameters
+  bool enable_localization_{};
+  double landmark_map_x_{};
+  double landmark_map_y_{};
+
+  // Localization state
+  bool localization_valid_{false};
+  double last_robot_x_{};
+  double last_robot_y_{};
+  double last_robot_yaw_{};
+
   double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
   bool calib_started_{false};
   rclcpp::Time calib_start_time_{};
