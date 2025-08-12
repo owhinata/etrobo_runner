@@ -6,13 +6,38 @@
 - Execution mode: subscribes to topics only (no file mode).
 - Latency policy: prioritize the latest image. Do not abort a frame once processing has started; always finish the current frame.
 
+## Startup Calibration
+- States:
+  - `CalibratePitch` (initial): do not publish `~lines`; estimate camera pitch from a gray circle at a known ground distance using `~camera_info` intrinsics.
+  - `Ready`: publish `~lines` and `~markers` normally.
+- Parameters:
+  - `camera_info_topic` (string; default: `camera_info`)
+  - `camera_height_meters` (double; default: `0.2`)
+  - `landmark_distance_meters` (double; default: `0.59`)
+  - `calib_timeout_sec` (double; default: `60.0`; `0` disables timeout and keeps calibration running)
+  - Uses an internal buffer of landmark detections (median of ~10 samples) to robustly estimate pitch.
+
+## Calibration Parameters (Gray Circle Detection)
+- `calib_roi` (int[4]; default: `[200, 150, 240, 180]`): ROI for gray circle detection `[x, y, w, h]`
+- HSV thresholds for gray circle detection:
+  - `calib_hsv_s_max` (int; default: `16`): maximum saturation (very low for gray objects)
+  - `calib_hsv_v_min` (int; default: `100`): minimum brightness value
+  - `calib_hsv_v_max` (int; default: `168`): maximum brightness value
+- Circle detection constraints:
+  - `calib_min_area` (int; default: `80`): minimum contour area in pixels
+  - `calib_min_major_px` (int; default: `8`): minimum ellipse major axis length
+  - `calib_max_major_ratio` (double; default: `0.65`): maximum major axis as fraction of image size
+  - `calib_fill_min` (double; default: `0.25`): minimum fill ratio (mask pixels / ellipse area)
+- Debug visualization: HSV mask displayed in top-right corner during calibration
+
 ## Topics
 - Input
   - `~image` (`sensor_msgs/msg/Image`): subscribe via `image_transport` (raw recommended)
+  - `~camera_info` (`sensor_msgs/msg/CameraInfo`): intrinsics for calibration
 - Output
   - `~image_with_lines` (`sensor_msgs/msg/Image`): debug image with detected lines overlaid (BGR8)
   - `~lines` (`std_msgs/msg/Float32MultiArray`): detected line segments, each as `[x1, y1, x2, y2]` in a flat array
-  - `~markers` (`visualization_msgs/msg/MarkerArray`): optional RViz markers for lines (controlled by a parameter)
+
 
 ## QoS and Latency Optimization
 - Subscription QoS: `rclcpp::SensorDataQoS().keep_last(1).best_effort().durability_volatile()`
@@ -23,13 +48,13 @@
 ## Parameters
 - I/O
   - `image_topic` (string; default: `image`): subscription topic name (also remappable)
-  - `use_color_output` (bool; default: `true`): publish output image as BGR8
+  - `publish_image_with_lines` (bool; default: `false`): enable image output publisher
+  - `show_edges` (bool; default: `false`): display edge image instead of original for debugging
 - Pre-processing
-  - `grayscale` (bool; default: `true`)
   - `blur_ksize` (int; default: `5`) odd values only
   - `blur_sigma` (double; default: `1.5`)
   - `roi` (int[4]; default: `[-1, -1, -1, -1]`) `[x, y, w, h]` (disabled when -1)
-  - `downscale` (double; default: `1.0`) `> 0`; 1.0 disables downscaling
+
 - Canny
   - `canny_low` (int; default: `40`), `canny_high` (int; default: `120`)
   - `canny_aperture` (int; default: `3`) allowed: 3, 5, 7
@@ -41,47 +66,38 @@
   - standard: `min_theta_deg` (double; `0`), `max_theta_deg` (double; `180`)
 - Visualization
   - `draw_color_bgr` (int[3]; default: `[0, 255, 0]`), `draw_thickness` (int; default: `2`)
-  - `publish_markers` (bool; default: `true`)
-  - `publish_image_with_lines` (bool; default: `false`): publish the overlay image.
-    When `false`, the node does not create the image publisher and skips all
-    visualization rendering to reduce CPU load.
+
+  - During calibration: displays HSV mask (160x120px) in top-right corner with semi-transparent background
 
 ## HSV Mask (optional)
 - `use_hsv_mask` (bool; default: `true`): enable HSV masking after Canny to isolate the black center line.
 - Thresholds:
   - `hsv_lower_h` (int; default: `0`), `hsv_lower_s` (int; default: `0`), `hsv_lower_v` (int; default: `0`)
-  - `hsv_upper_h` (int; default: `180`), `hsv_upper_s` (int; default: `120`), `hsv_upper_v` (int; default: `150`)
+  - `hsv_upper_h` (int; default: `180`), `hsv_upper_s` (int; default: `40`), `hsv_upper_v` (int; default: `148`)
 - Morphology:
   - `hsv_dilate_kernel` (int; default: `3`): odd kernel size.
-  - `hsv_dilate_iter` (int; default: `1`): dilation iterations (0 to disable).
+  - `hsv_dilate_iter` (int; default: `2`): dilation iterations (0 to disable).
 
-## Edge Closing (optional)
-- `use_edge_close` (bool; default: `true`): apply morphological closing on edges to reduce fragmentation.
-- `edge_close_kernel` (int; default: `3`): odd kernel size for rectangular structuring element.
-- `edge_close_iter` (int; default: `1`): number of closing iterations (0 to disable).
 
-## Temporal Smoothing (optional)
-- `enable_temporal_smoothing` (bool; default: `true`): publish temporally smoothed line segments.
-- `ema_alpha` (double; default: `0.5`): EMA factor for endpoints; closer to 1.0 trusts the current frame more.
-- `match_max_px` (int; default: `20`): maximum sum of endpoint distances (with best endpoint pairing) to consider a match.
-- `match_max_angle_deg` (double; default: `10.0`): maximum angle difference between track and detection.
-- `min_age_to_publish` (int; default: `2`): minimum matched frames before a track is published.
-- `max_missed` (int; default: `3`): maximum consecutive frames a track can miss before removal.
-
-Algorithm: per frame, greedily match detections to existing tracks using endpoint distance and angle thresholds. Update matched tracks via EMA on endpoints; create new tracks for unmatched detections; age and prune stale tracks. Publish tracks whose age ≥ `min_age_to_publish` (fallback to raw detections if no stable tracks exist in a frame).
 
 ## Processing Flow
 1. Convert the received image to `cv::Mat` via `cv_bridge`.
-2. Apply ROI cropping → downscale (`downscale`).
+2. Apply ROI cropping.
 3. Convert to grayscale if needed → apply GaussianBlur.
 4. Run Canny edge detection.
-   - If enabled, apply HSV mask to the Canny edges, then optional edge closing (morphological close) before Hough.
+   - If enabled, apply HSV mask to the Canny edges.
 5. Run Hough transform
-6. If temporal smoothing is enabled, match detections to existing tracks and publish smoothed segments (otherwise publish raw detections).
    - `probabilistic`: use `cv::HoughLinesP` to obtain segments (x1, y1, x2, y2)
    - `standard`: use `cv::HoughLines` to obtain (rho, theta), then extend to image borders to form segments
-6. Invert ROI/downscale to restore coordinates to the original scale.
-7. Draw overlays → publish `image_with_lines`, and publish `lines` and `markers`.
+6. Restore ROI coordinates to the original scale.
+7. Draw overlays → publish `image_with_lines` and `lines`.
+
+### Calibration math (summary)
+- Let `v` be the median image row of the gray circle center (pixels), `fy, cy` from camera intrinsics, `u = (v - cy)/fy`.
+- Let `h` be camera height [m], `D` the known forward ground distance to the circle [m].
+- From a pinhole model with pitch `θ` (downward positive), ray–ground intersection yields:
+  - `tan(θ) = (D * u - h) / (D + h * u)` and `θ = atan(tan(θ))`.
+  - Clamp to a plausible range (±45 deg) and transition to Ready.
 
 ## Timing Logs (steady_clock)
 - Capture `std::chrono::steady_clock::now()` at the start of the image callback.
@@ -96,7 +112,7 @@ Algorithm: per frame, greedily match detections to existing tracks using endpoin
 ## Error Handling
 - Invalid ROI is disabled with a WARN log.
 - Unsupported encodings are converted to BGR/mono if possible; otherwise log WARN and skip the frame.
-- Coerce `downscale <= 0` to `1.0`.
+
 - Reject out-of-range parameters for Canny/Hough at update time.
 
 ## Dependencies
