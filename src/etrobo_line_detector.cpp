@@ -367,6 +367,7 @@ class LineDetectorNode : public rclcpp::Node {
 
     // Step 2: Calibration phase
     if (state_ == State::Calibrating) {
+      RCLCPP_DEBUG(this->get_logger(), "Processing frame in calibration mode");
       if (calibrator_->process_frame(original_img)) {
         // Calibration completed
         estimated_pitch_rad_ = calibrator_->get_estimated_pitch();
@@ -408,6 +409,10 @@ class LineDetectorNode : public rclcpp::Node {
       RCLCPP_INFO(this->get_logger(),
                   "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
                   last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
+    } else if (state_ == State::Calibrating) {
+      RCLCPP_DEBUG(this->get_logger(),
+                   "Calibrating: %zu lines detected in %.2f ms",
+                   segments_out.size(), ms);
     } else {
       RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
                   segments_out.size(), ms);
@@ -904,8 +909,29 @@ bool CameraCalibrator::process_frame(const cv::Mat& img) {
     return true;  // Already completed
   }
 
+  // Initialize calibration start time if not started
+  if (!calib_started_) {
+    calib_started_ = true;
+    calib_start_time_ = node_->now();
+    RCLCPP_INFO(node_->get_logger(), "Calibration started");
+  }
+
+  // Check for timeout
+  if (calib_timeout_sec_ > 0.0) {
+    auto elapsed = (node_->now() - calib_start_time_).seconds();
+    if (elapsed > calib_timeout_sec_) {
+      RCLCPP_WARN(node_->get_logger(),
+                  "Calibration timeout (%.1f sec). Skipping calibration.",
+                  calib_timeout_sec_);
+      calibration_complete_ = true;
+      return true;
+    }
+  }
+
   // Detect landmark center in the calibration ROI
   cv::Rect calib_rect = valid_roi(img, calib_roi_);
+  RCLCPP_DEBUG(node_->get_logger(), "Calibration ROI: x=%d, y=%d, w=%d, h=%d",
+               calib_rect.x, calib_rect.y, calib_rect.width, calib_rect.height);
 
   // Extract work region (apply scaling if needed)
   cv::Mat work = img(calib_rect).clone();
@@ -915,6 +941,9 @@ bool CameraCalibrator::process_frame(const cv::Mat& img) {
   if (detect_landmark_center(work, calib_rect, scale, x_full_out, v_full_out)) {
     // Valid detection: store v coordinate
     v_samples_.push_back(v_full_out);
+    RCLCPP_INFO(node_->get_logger(),
+                "Landmark detected at (%.1f, %.1f). Samples: %zu/%zu",
+                x_full_out, v_full_out, v_samples_.size(), kMinCalibSamples);
 
     // Store circle/ellipse data for visualization
     last_circle_px_ = cv::Point2d(x_full_out, v_full_out);
@@ -922,6 +951,8 @@ bool CameraCalibrator::process_frame(const cv::Mat& img) {
 
     // Try to finalize calibration
     try_finalize_calibration();
+  } else {
+    RCLCPP_DEBUG(node_->get_logger(), "No landmark detected in this frame");
   }
 
   return calibration_complete_;
@@ -948,7 +979,11 @@ bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
                                               const cv::Rect& roi, double scale,
                                               double& x_full_out,
                                               double& v_full_out) {
-  if (work_img.empty()) return false;
+  if (work_img.empty()) {
+    RCLCPP_WARN(node_->get_logger(),
+                "Empty work image in detect_landmark_center");
+    return false;
+  }
 
   cv::Mat work_bgr;
   if (work_img.channels() == 1) {
@@ -975,6 +1010,8 @@ bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
 
   std::vector<std::vector<cv::Point>> contours;
   cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+  RCLCPP_DEBUG(node_->get_logger(), "Found %zu contours in HSV mask",
+               contours.size());
 
   auto work_center = cv::Point2f(static_cast<float>(work_bgr.cols) / 2.0f,
                                  static_cast<float>(work_bgr.rows) / 2.0f);
@@ -988,7 +1025,11 @@ bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
   for (const auto& cnt : contours) {
     if (cnt.size() < 5) continue;
     double area = cv::contourArea(cnt);
-    if (area < static_cast<double>(calib_min_area_)) continue;
+    if (area < static_cast<double>(calib_min_area_)) {
+      RCLCPP_DEBUG(node_->get_logger(), "Contour rejected: area %.1f < min %d",
+                   area, calib_min_area_);
+      continue;
+    }
 
     cv::RotatedRect e = cv::fitEllipse(cnt);
 
@@ -1057,6 +1098,8 @@ bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
 
   // Edge-based fallback within HSV mask region
   if (!found) {
+    RCLCPP_DEBUG(node_->get_logger(),
+                 "No landmark found in contours, trying edge-based detection");
     cv::Mat gray;
     cv::cvtColor(work_bgr, gray, cv::COLOR_BGR2GRAY);
     cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.2);
@@ -1096,7 +1139,11 @@ bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
     }
   }
 
-  if (!found) return false;
+  if (!found) {
+    RCLCPP_DEBUG(node_->get_logger(),
+                 "No landmark found after edge-based detection");
+    return false;
+  }
 
   // Recompute metrics for the selected ellipse (in work coordinates)
   double sel_width = best_ellipse.size.width;
