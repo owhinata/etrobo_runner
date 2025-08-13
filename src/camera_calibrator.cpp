@@ -25,6 +25,78 @@ static double median(std::vector<double> v) {
   return m;
 }
 
+// Static helper functions for image processing
+static cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi) {
+  if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
+  int x = static_cast<int>(roi[0]);
+  int y = static_cast<int>(roi[1]);
+  int w = static_cast<int>(roi[2]);
+  int h = static_cast<int>(roi[3]);
+  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+    return cv::Rect(0, 0, img.cols, img.rows);
+  }
+  x = std::max(0, std::min(x, img.cols - 1));
+  y = std::max(0, std::min(y, img.rows - 1));
+  w = std::min(w, img.cols - x);
+  h = std::min(h, img.rows - y);
+  return cv::Rect(x, y, w, h);
+}
+
+static cv::Mat create_hsv_mask(const cv::Mat& bgr_img, int hsv_v_min,
+                               int hsv_s_max, int hsv_v_max) {
+  cv::Mat hsv;
+  cv::cvtColor(bgr_img, hsv, cv::COLOR_BGR2HSV);
+  cv::Mat mask;
+  cv::inRange(hsv, cv::Scalar(0, 0, hsv_v_min),
+              cv::Scalar(180, hsv_s_max, hsv_v_max), mask);
+
+  cv::medianBlur(mask, mask, 5);
+  cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+  cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
+  cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
+
+  return mask;
+}
+
+static double score_ellipse(const cv::RotatedRect& ellipse,
+                            const cv::Mat& bgr_img, const cv::Mat& hsv_img,
+                            int hsv_v_min, int hsv_v_max, int hsv_s_max) {
+  auto work_center = cv::Point2f(static_cast<float>(bgr_img.cols) / 2.0f,
+                                 static_cast<float>(bgr_img.rows) / 2.0f);
+
+  double width = ellipse.size.width, height = ellipse.size.height;
+  double angle_deg = ellipse.angle;
+  if (width < height) {
+    std::swap(width, height);
+    angle_deg += 90.0;
+  }
+  while (angle_deg < 0.0) angle_deg += 180.0;
+  while (angle_deg >= 180.0) angle_deg -= 180.0;
+
+  double major = width / 2.0;
+
+  cv::Mat ell_mask = cv::Mat::zeros(bgr_img.size(), CV_8UC1);
+  cv::ellipse(ell_mask, ellipse, cv::Scalar(255), -1);
+  cv::Scalar mean_hsv = cv::mean(hsv_img, ell_mask);
+  double mean_s = mean_hsv[1];
+  double mean_v = mean_hsv[2];
+
+  double v_target =
+      0.5 * (static_cast<double>(hsv_v_min) + static_cast<double>(hsv_v_max));
+
+  double d = cv::norm(ellipse.center - work_center);
+  double angle_pen = std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
+
+  double score = 0.0;
+  score += d;
+  score += 0.05 * major;
+  score += 0.2 * angle_pen;
+  score += 0.10 * std::max(0.0, mean_s - static_cast<double>(hsv_s_max));
+  score += 0.002 * std::abs(mean_v - v_target);
+
+  return score;
+}
+
 // Implementation class definition
 class CameraCalibrator::Impl {
  public:
@@ -58,16 +130,12 @@ class CameraCalibrator::Impl {
  private:
   // Internal utility methods
   bool detect_landmark_center(double& x_full_out, double& v_full_out);
-  cv::Mat create_hsv_mask(const cv::Mat& bgr_img);
   bool find_ellipse_from_contours(
       const std::vector<std::vector<cv::Point>>& contours,
       const cv::Mat& bgr_img, const cv::Mat& hsv_img, const cv::Mat& mask,
       cv::RotatedRect& best_ellipse);
   bool find_ellipse_edge_based(const cv::Mat& bgr_img, const cv::Mat& mask,
                                cv::RotatedRect& best_ellipse);
-  double score_ellipse(const cv::RotatedRect& ellipse, const cv::Mat& bgr_img,
-                       const cv::Mat& hsv_img, const cv::Mat&);
-  cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
   void try_finalize_calibration();
 
   // Visualization data access (internal use)
@@ -289,78 +357,6 @@ bool CameraCalibrator::Impl::process_frame() {
   return calibration_complete_;
 }
 
-cv::Rect CameraCalibrator::Impl::valid_roi(const cv::Mat& img,
-                                           const std::vector<int64_t>& roi) {
-  if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
-  int x = static_cast<int>(roi[0]);
-  int y = static_cast<int>(roi[1]);
-  int w = static_cast<int>(roi[2]);
-  int h = static_cast<int>(roi[3]);
-  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
-    return cv::Rect(0, 0, img.cols, img.rows);
-  }
-  x = std::max(0, std::min(x, img.cols - 1));
-  y = std::max(0, std::min(y, img.rows - 1));
-  w = std::min(w, img.cols - x);
-  h = std::min(h, img.rows - y);
-  return cv::Rect(x, y, w, h);
-}
-
-cv::Mat CameraCalibrator::Impl::create_hsv_mask(const cv::Mat& bgr_img) {
-  cv::Mat hsv;
-  cv::cvtColor(bgr_img, hsv, cv::COLOR_BGR2HSV);
-  cv::Mat mask;
-  cv::inRange(hsv, cv::Scalar(0, 0, calib_hsv_v_min_),
-              cv::Scalar(180, calib_hsv_s_max_, calib_hsv_v_max_), mask);
-
-  cv::medianBlur(mask, mask, 5);
-  cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-  cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
-  cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
-
-  return mask;
-}
-
-double CameraCalibrator::Impl::score_ellipse(const cv::RotatedRect& ellipse,
-                                             const cv::Mat& bgr_img,
-                                             const cv::Mat& hsv_img,
-                                             const cv::Mat&) {
-  auto work_center = cv::Point2f(static_cast<float>(bgr_img.cols) / 2.0f,
-                                 static_cast<float>(bgr_img.rows) / 2.0f);
-
-  double width = ellipse.size.width, height = ellipse.size.height;
-  double angle_deg = ellipse.angle;
-  if (width < height) {
-    std::swap(width, height);
-    angle_deg += 90.0;
-  }
-  while (angle_deg < 0.0) angle_deg += 180.0;
-  while (angle_deg >= 180.0) angle_deg -= 180.0;
-
-  double major = width / 2.0;
-
-  cv::Mat ell_mask = cv::Mat::zeros(bgr_img.size(), CV_8UC1);
-  cv::ellipse(ell_mask, ellipse, cv::Scalar(255), -1);
-  cv::Scalar mean_hsv = cv::mean(hsv_img, ell_mask);
-  double mean_s = mean_hsv[1];
-  double mean_v = mean_hsv[2];
-
-  double v_target = 0.5 * (static_cast<double>(calib_hsv_v_min_) +
-                           static_cast<double>(calib_hsv_v_max_));
-
-  double d = cv::norm(ellipse.center - work_center);
-  double angle_pen = std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
-
-  double score = 0.0;
-  score += d;
-  score += 0.05 * major;
-  score += 0.2 * angle_pen;
-  score += 0.10 * std::max(0.0, mean_s - static_cast<double>(calib_hsv_s_max_));
-  score += 0.002 * std::abs(mean_v - v_target);
-
-  return score;
-}
-
 bool CameraCalibrator::Impl::find_ellipse_from_contours(
     const std::vector<std::vector<cv::Point>>& contours, const cv::Mat& bgr_img,
     const cv::Mat& hsv_img, const cv::Mat& mask,
@@ -416,7 +412,8 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
 
     if (fill < calib_fill_min_) continue;
 
-    double score = score_ellipse(e, bgr_img, hsv_img, mask);
+    double score = score_ellipse(e, bgr_img, hsv_img, calib_hsv_v_min_,
+                                 calib_hsv_v_max_, calib_hsv_s_max_);
 
     if (score < best_score) {
       best_score = score;
@@ -530,7 +527,8 @@ bool CameraCalibrator::Impl::detect_landmark_center(double& x_full_out,
   // Create HSV mask for gray landmark detection
   cv::Mat hsv;
   cv::cvtColor(work_bgr, hsv, cv::COLOR_BGR2HSV);
-  cv::Mat mask = create_hsv_mask(work_bgr);
+  cv::Mat mask = create_hsv_mask(work_bgr, calib_hsv_v_min_, calib_hsv_s_max_,
+                                 calib_hsv_v_max_);
 
   // Store processed HSV mask for debug visualization
   last_calib_hsv_mask_ = mask.clone();
