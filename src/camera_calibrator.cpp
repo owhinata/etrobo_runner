@@ -11,6 +11,19 @@
 static inline double deg2rad(double deg) { return deg * CV_PI / 180.0; }
 static inline double rad2deg(double rad) { return rad * 180.0 / CV_PI; }
 
+// Helper function for median calculation
+static double median(std::vector<double> v) {
+  if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
+  const size_t n = v.size();
+  std::nth_element(v.begin(), v.begin() + n / 2, v.end());
+  double m = v[n / 2];
+  if ((n % 2) == 0) {
+    auto max_it = std::max_element(v.begin(), v.begin() + n / 2);
+    m = (m + *max_it) * 0.5;
+  }
+  return m;
+}
+
 CameraCalibrator::CameraCalibrator(LineDetectorNode* node) : node_(node) {
   // Initialize calibration state
   calib_started_ = false;
@@ -132,17 +145,9 @@ bool CameraCalibrator::process_frame(const cv::Mat& img) {
     }
   }
 
-  // Detect landmark center in the calibration ROI
-  cv::Rect calib_rect = valid_roi(img, calib_roi_);
-  RCLCPP_DEBUG(node_->get_logger(), "Calibration ROI: x=%d, y=%d, w=%d, h=%d",
-               calib_rect.x, calib_rect.y, calib_rect.width, calib_rect.height);
-
-  // Extract work region (apply scaling if needed)
-  cv::Mat work = img(calib_rect).clone();
-  const double scale = 1.0;  // No scaling currently
-
+  // Detect landmark center (ROI is applied internally)
   double x_full_out, v_full_out;
-  if (detect_landmark_center(work, calib_rect, scale, x_full_out, v_full_out)) {
+  if (detect_landmark_center(img, x_full_out, v_full_out)) {
     // Valid detection: store v coordinate
     v_samples_.push_back(v_full_out);
     RCLCPP_INFO(node_->get_logger(),
@@ -355,15 +360,41 @@ bool CameraCalibrator::find_ellipse_edge_based(const cv::Mat& bgr_img,
 
   return found;
 }
-bool CameraCalibrator::detect_landmark_center(const cv::Mat& work_img,
-                                              const cv::Rect& roi, double scale,
+void CameraCalibrator::draw_visualization_overlay(cv::Mat& img) const {
+  if (!has_valid_ellipse()) {
+    return;
+  }
+
+  // Draw the detected ellipse in cyan
+  cv::ellipse(img, last_ellipse_full_, cv::Scalar(0, 255, 255), 2);
+
+  // Draw the center point as a red filled circle
+  if (last_circle_valid_) {
+    cv::circle(img,
+               cv::Point(static_cast<int>(last_circle_px_.x),
+                         static_cast<int>(last_circle_px_.y)),
+               5, cv::Scalar(0, 0, 255), -1);
+  }
+
+  // Add calibration info text showing S and V values
+  cv::putText(img,
+              cv::format("Calib: S=%.1f V=%.1f", last_mean_s_, last_mean_v_),
+              cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5,
+              cv::Scalar(0, 255, 255), 1);
+}
+
+bool CameraCalibrator::detect_landmark_center(const cv::Mat& full_img,
                                               double& x_full_out,
                                               double& v_full_out) {
-  if (work_img.empty()) {
-    RCLCPP_WARN(node_->get_logger(),
-                "Empty work image in detect_landmark_center");
+  if (full_img.empty()) {
+    RCLCPP_WARN(node_->get_logger(), "Empty image in detect_landmark_center");
     return false;
   }
+
+  // Apply ROI internally
+  cv::Rect roi = valid_roi(full_img, calib_roi_);
+  cv::Mat work_img = full_img(roi).clone();
+  const double scale = 1.0;  // No scaling currently
 
   // Convert to BGR if needed
   cv::Mat work_bgr;
@@ -505,16 +536,4 @@ void CameraCalibrator::try_finalize_calibration() {
   RCLCPP_INFO(node_->get_logger(),
               "Calibration complete! Estimated pitch: %.2f deg",
               rad2deg(estimated_pitch_rad_));
-}
-
-double CameraCalibrator::median(std::vector<double> v) {
-  if (v.empty()) return std::numeric_limits<double>::quiet_NaN();
-  const size_t n = v.size();
-  std::nth_element(v.begin(), v.begin() + n / 2, v.end());
-  double m = v[n / 2];
-  if ((n % 2) == 0) {
-    auto max_it = std::max_element(v.begin(), v.begin() + n / 2);
-    m = (m + *max_it) * 0.5;
-  }
-  return m;
 }

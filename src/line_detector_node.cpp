@@ -413,12 +413,9 @@ void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
 void LineDetectorNode::perform_localization(
     const std::vector<cv::Vec4i>& segments_out, const cv::Mat& original_img) {
   // Use full-resolution image for detection
-  const double scale = 1.0;
-  cv::Rect detect_roi = valid_roi(original_img, calibrator_->get_calib_roi());
-
   double x_full, v_full;
-  bool found = calibrator_->detect_landmark_center(
-      original_img(detect_roi), detect_roi, scale, x_full, v_full);
+  bool found =
+      calibrator_->detect_landmark_center(original_img, x_full, v_full);
 
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
     localization_valid_ = false;
@@ -496,21 +493,8 @@ void LineDetectorNode::publish_visualization(
   }
 
   // Draw calibration visualization
-  if (state_ == State::Calibrating && calibrator_->has_valid_ellipse()) {
-    cv::ellipse(output_img, calibrator_->get_last_ellipse(),
-                cv::Scalar(0, 255, 255), 2);
-    cv::circle(output_img,
-               cv::Point(static_cast<int>(calibrator_->get_last_circle().x),
-                         static_cast<int>(calibrator_->get_last_circle().y)),
-               5, cv::Scalar(0, 0, 255), -1);
-
-    // Add calibration info text
-    cv::putText(
-        output_img,
-        cv::format("Calib: S=%.1f V=%.1f", calibrator_->get_last_mean_s(),
-                   calibrator_->get_last_mean_v()),
-        cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5,
-        cv::Scalar(0, 255, 255), 1);
+  if (state_ == State::Calibrating) {
+    calibrator_->draw_visualization_overlay(output_img);
   }
 
   // Add localization info

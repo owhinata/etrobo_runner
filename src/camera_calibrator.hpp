@@ -25,25 +25,13 @@ class CameraCalibrator {
   bool is_calibration_complete() const { return calibration_complete_; }
   double get_estimated_pitch() const { return estimated_pitch_rad_; }
 
-  // Visualization data access
-  bool has_valid_circle() const { return last_circle_valid_; }
-  bool has_valid_ellipse() const { return last_ellipse_valid_; }
-  cv::Point2d get_last_circle() const { return last_circle_px_; }
-  cv::RotatedRect get_last_ellipse() const { return last_ellipse_full_; }
-  cv::Mat get_last_hsv_mask() const { return last_calib_hsv_mask_; }
-
-  // Metrics for visualization
-  double get_last_angle_deg() const { return last_angle_deg_; }
-  double get_last_ratio() const { return last_ratio_; }
-  double get_last_mean_s() const { return last_mean_s_; }
-  double get_last_mean_v() const { return last_mean_v_; }
-
   // Get calibration parameters
-  const std::vector<int64_t>& get_calib_roi() const { return calib_roi_; }
   double get_camera_height() const { return camera_height_m_; }
 
-  bool detect_landmark_center(const cv::Mat& work_img, const cv::Rect& roi,
-                              double scale, double& x_full_out,
+  // Draw visualization overlay for image_with_lines output
+  void draw_visualization_overlay(cv::Mat& img) const;
+
+  bool detect_landmark_center(const cv::Mat& full_img, double& x_full_out,
                               double& v_full_out);
 
  private:
@@ -59,7 +47,17 @@ class CameraCalibrator {
                        const cv::Mat& hsv_img, const cv::Mat&);
   cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
   void try_finalize_calibration();
-  static double median(std::vector<double> v);
+
+  // Visualization data access (internal use)
+  bool has_valid_circle() const { return last_circle_valid_; }
+  bool has_valid_ellipse() const { return last_ellipse_valid_; }
+  cv::Point2d get_last_circle() const { return last_circle_px_; }
+  cv::RotatedRect get_last_ellipse() const { return last_ellipse_full_; }
+  cv::Mat get_last_hsv_mask() const { return last_calib_hsv_mask_; }
+  double get_last_angle_deg() const { return last_angle_deg_; }
+  double get_last_ratio() const { return last_ratio_; }
+  double get_last_mean_s() const { return last_mean_s_; }
+  double get_last_mean_v() const { return last_mean_v_; }
 
   LineDetectorNode* node_;
 
