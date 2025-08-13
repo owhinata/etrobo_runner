@@ -417,8 +417,8 @@ void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
 void LineDetectorNode::perform_localization(
     const std::vector<cv::Vec4i>& segments_out) {
   // Use full-resolution image for detection
-  double x_full, v_full;
-  bool found = calibrator_->detect_landmark_in_frame(x_full, v_full);
+  cv::Point2d landmark_pos;
+  bool found = calibrator_->detect_landmark_in_frame(landmark_pos);
 
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
     localization_valid_ = false;
@@ -426,7 +426,7 @@ void LineDetectorNode::perform_localization(
   }
 
   // Compute robot position from landmark
-  const double u = (v_full - cy_) / fy_;
+  const double u = (landmark_pos.y - cy_) / fy_;
   const double phi = estimated_pitch_rad_;
   const double tan_phi = std::tan(phi);
   const double h = calibrator_->get_camera_height();
@@ -440,7 +440,7 @@ void LineDetectorNode::perform_localization(
   const double d = h / denom;
 
   // Lateral offset from image x coordinate
-  const double x_offset = (x_full - cx_) / fx_ * d;
+  const double x_offset = (landmark_pos.x - cx_) / fx_ * d;
 
   // Robot position relative to landmark
   const double robot_x = landmark_map_x_ - x_offset;

@@ -36,7 +36,7 @@ class CameraCalibrator {
   void draw_visualization_overlay(cv::Mat& img) const;
 
   // For localization: detect landmark in current frame
-  bool detect_landmark_in_frame(double& x_full_out, double& v_full_out);
+  bool detect_landmark_in_frame(cv::Point2d& landmark_pos);
 
  private:
   // Forward declaration of implementation class
