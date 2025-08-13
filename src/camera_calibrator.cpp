@@ -28,12 +28,6 @@ CameraCalibrator::CameraCalibrator(LineDetectorNode* node) : node_(node) {
 
   // Declare and initialize parameters
   declare_parameters();
-
-  // Start calibration timer if timeout is enabled
-  if (calib_timeout_sec_ > 0.0) {
-    calib_start_time_ = node_->now();
-    calib_started_ = true;
-  }
 }
 
 void CameraCalibrator::declare_parameters() {
