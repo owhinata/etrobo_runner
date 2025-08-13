@@ -81,7 +81,6 @@ class CameraCalibrator::Impl {
     last_mean_v_ = 0.0;
     last_ratio_ = 0.0;
     last_angle_deg_ = 0.0;
-    last_fill_ = 0.0;
   }
 
   // Public interface methods
@@ -129,7 +128,6 @@ class CameraCalibrator::Impl {
   double last_ratio_{};
   double last_mean_s_{};
   double last_mean_v_{};
-  double last_fill_{};
   cv::Mat last_calib_hsv_mask_;
 
   // Calibration parameters (owned by this class)
@@ -396,6 +394,11 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
     if (score < best_score) {
       best_score = score;
       best_ellipse = e;
+      // Store metrics for visualization
+      last_angle_deg_ = angle_deg;
+      last_ratio_ = ratio;
+      last_mean_s_ = mean_s;
+      last_mean_v_ = mean_v;
       found = true;
     }
   }
@@ -448,38 +451,6 @@ bool CameraCalibrator::Impl::detect_landmark_center(cv::Point2d& landmark_pos) {
   if (!found) {
     RCLCPP_DEBUG(node_->get_logger(), "No landmark found in contours");
     return false;
-  }
-
-  // Compute final metrics for the selected ellipse
-  double sel_width = best_ellipse.size.width;
-  double sel_height = best_ellipse.size.height;
-  double sel_angle_deg = best_ellipse.angle;
-  if (sel_width < sel_height) {
-    std::swap(sel_width, sel_height);
-    sel_angle_deg += 90.0;
-  }
-  while (sel_angle_deg < 0.0) sel_angle_deg += 180.0;
-  while (sel_angle_deg >= 180.0) sel_angle_deg -= 180.0;
-
-  double sel_major = sel_width / 2.0;
-  double sel_minor = sel_height / 2.0;
-  cv::Mat sel_mask = cv::Mat::zeros(work_bgr.size(), CV_8UC1);
-  cv::ellipse(sel_mask, best_ellipse, cv::Scalar(255), -1);
-  cv::Scalar sel_mean_hsv = cv::mean(hsv, sel_mask);
-
-  // Store metrics for visualization
-  last_mean_s_ = sel_mean_hsv[1];
-  last_mean_v_ = sel_mean_hsv[2];
-  last_ratio_ = (sel_major > 1e-9) ? (sel_minor / sel_major) : 0.0;
-  last_angle_deg_ = sel_angle_deg;
-
-  const double sel_area = CV_PI * sel_major * sel_minor;
-  if (sel_area > 1.0) {
-    cv::Mat mask_inside;
-    cv::bitwise_and(mask, sel_mask, mask_inside);
-    last_fill_ = static_cast<double>(cv::countNonZero(mask_inside)) / sel_area;
-  } else {
-    last_fill_ = 0.0;
   }
 
   // Map to full image coordinates
