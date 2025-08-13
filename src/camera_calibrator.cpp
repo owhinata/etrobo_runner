@@ -66,45 +66,6 @@ static cv::Mat create_hsv_mask(const cv::Mat& bgr_img, int hsv_v_min,
   return mask;
 }
 
-static double score_ellipse(const cv::RotatedRect& ellipse,
-                            const cv::Mat& bgr_img, const cv::Mat& hsv_img,
-                            int hsv_v_min, int hsv_v_max, int hsv_s_max) {
-  auto work_center = cv::Point2f(static_cast<float>(bgr_img.cols) / 2.0f,
-                                 static_cast<float>(bgr_img.rows) / 2.0f);
-
-  double width = ellipse.size.width, height = ellipse.size.height;
-  double angle_deg = ellipse.angle;
-  if (width < height) {
-    std::swap(width, height);
-    angle_deg += 90.0;
-  }
-  while (angle_deg < 0.0) angle_deg += 180.0;
-  while (angle_deg >= 180.0) angle_deg -= 180.0;
-
-  double major = width / 2.0;
-
-  cv::Mat ell_mask = cv::Mat::zeros(bgr_img.size(), CV_8UC1);
-  cv::ellipse(ell_mask, ellipse, cv::Scalar(255), -1);
-  cv::Scalar mean_hsv = cv::mean(hsv_img, ell_mask);
-  double mean_s = mean_hsv[1];
-  double mean_v = mean_hsv[2];
-
-  double v_target =
-      0.5 * (static_cast<double>(hsv_v_min) + static_cast<double>(hsv_v_max));
-
-  double d = cv::norm(ellipse.center - work_center);
-  double angle_pen = std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
-
-  double score = 0.0;
-  score += d;
-  score += 0.05 * major;
-  score += 0.2 * angle_pen;
-  score += 0.10 * std::max(0.0, mean_s - static_cast<double>(hsv_s_max));
-  score += 0.002 * std::abs(mean_v - v_target);
-
-  return score;
-}
-
 // Implementation class definition
 class CameraCalibrator::Impl {
  public:
@@ -360,6 +321,12 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
       calib_max_major_ratio_ *
       static_cast<double>(std::min(bgr_img.cols, bgr_img.rows));
 
+  // Pre-calculate work center and v_target once
+  const cv::Point2f work_center(static_cast<float>(bgr_img.cols) / 2.0f,
+                                static_cast<float>(bgr_img.rows) / 2.0f);
+  const double v_target = 0.5 * (static_cast<double>(calib_hsv_v_min_) +
+                                 static_cast<double>(calib_hsv_v_max_));
+
   bool found = false;
   double best_score = std::numeric_limits<double>::infinity();
 
@@ -374,6 +341,7 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
 
     cv::RotatedRect e = cv::fitEllipse(cnt);
 
+    // Calculate major/minor axes and normalize angle
     double width = e.size.width, height = e.size.height;
     double angle_deg = e.angle;
     if (width < height) {
@@ -390,13 +358,17 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
     double ratio = minor / major;
     if (ratio < 0.2 || ratio > 1.25) continue;
 
+    // Create ellipse mask and calculate HSV statistics
     cv::Mat ell_mask = cv::Mat::zeros(bgr_img.size(), CV_8UC1);
     cv::ellipse(ell_mask, e, cv::Scalar(255), -1);
     cv::Scalar mean_hsv = cv::mean(hsv_img, ell_mask);
+    double mean_s = mean_hsv[1];
     double mean_v = mean_hsv[2];
 
+    // Early rejection based on V value
     if (mean_v < static_cast<double>(calib_hsv_v_min_) + 10.0) continue;
 
+    // Calculate fill ratio
     cv::Mat mask_inside;
     cv::bitwise_and(mask, ell_mask, mask_inside);
     const double ellipse_area = CV_PI * major * minor;
@@ -407,8 +379,19 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
 
     if (fill < calib_fill_min_) continue;
 
-    double score = score_ellipse(e, bgr_img, hsv_img, calib_hsv_v_min_,
-                                 calib_hsv_v_max_, calib_hsv_s_max_);
+    // Calculate score (inlined from score_ellipse)
+    // Normalize angle to [0, 180)
+    while (angle_deg < 0.0) angle_deg += 180.0;
+    while (angle_deg >= 180.0) angle_deg -= 180.0;
+
+    double d = cv::norm(e.center - work_center);
+    double angle_pen =
+        std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
+
+    double score =
+        d + 0.05 * major + 0.2 * angle_pen +
+        0.10 * std::max(0.0, mean_s - static_cast<double>(calib_hsv_s_max_)) +
+        0.002 * std::abs(mean_v - v_target);
 
     if (score < best_score) {
       best_score = score;
