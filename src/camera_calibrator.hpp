@@ -15,6 +15,9 @@ class CameraCalibrator {
   // Initialize and declare calibration parameters
   void declare_parameters();
 
+  // Try to update a parameter if it belongs to CameraCalibrator
+  bool try_update_parameter(const rclcpp::Parameter& param);
+
   // Main processing method
   bool process_frame(const cv::Mat& img);
 

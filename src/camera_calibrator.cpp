@@ -69,6 +69,51 @@ void CameraCalibrator::declare_parameters() {
   calib_fill_min_ = std::max(0.0, std::min(1.0, calib_fill_min_));
 }
 
+bool CameraCalibrator::try_update_parameter(const rclcpp::Parameter& param) {
+  const std::string& name = param.get_name();
+
+  // Check if this parameter belongs to CameraCalibrator
+  if (name == "camera_height_meters") {
+    camera_height_m_ = std::max(0.01, param.as_double());
+    return true;
+  } else if (name == "landmark_distance_meters") {
+    landmark_distance_m_ = std::max(0.01, param.as_double());
+    return true;
+  } else if (name == "calib_timeout_sec") {
+    calib_timeout_sec_ = std::max(0.0, param.as_double());
+    return true;
+  } else if (name == "calib_roi") {
+    calib_roi_ = param.as_integer_array();
+    return true;
+  } else if (name == "calib_hsv_s_max") {
+    calib_hsv_s_max_ =
+        std::max(0, std::min(255, static_cast<int>(param.as_int())));
+    return true;
+  } else if (name == "calib_hsv_v_min") {
+    calib_hsv_v_min_ =
+        std::max(0, std::min(255, static_cast<int>(param.as_int())));
+    return true;
+  } else if (name == "calib_hsv_v_max") {
+    calib_hsv_v_max_ = std::max(
+        calib_hsv_v_min_, std::min(255, static_cast<int>(param.as_int())));
+    return true;
+  } else if (name == "calib_min_area") {
+    calib_min_area_ = std::max(1, static_cast<int>(param.as_int()));
+    return true;
+  } else if (name == "calib_min_major_px") {
+    calib_min_major_px_ = std::max(1, static_cast<int>(param.as_int()));
+    return true;
+  } else if (name == "calib_max_major_ratio") {
+    calib_max_major_ratio_ = std::max(0.1, std::min(1.0, param.as_double()));
+    return true;
+  } else if (name == "calib_fill_min") {
+    calib_fill_min_ = std::max(0.0, std::min(1.0, param.as_double()));
+    return true;
+  }
+
+  // Not a CameraCalibrator parameter
+  return false;
+}
 bool CameraCalibrator::process_frame(const cv::Mat& img) {
   if (calibration_complete_) {
     return true;  // Already completed

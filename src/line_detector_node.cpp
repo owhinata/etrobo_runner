@@ -169,6 +169,11 @@ rcl_interfaces::msg::SetParametersResult LineDetectorNode::on_parameters_set(
     const std::vector<rclcpp::Parameter>& parameters) {
   std::lock_guard<std::mutex> lock(param_mutex_);
   for (const auto& param : parameters) {
+    // Try CameraCalibrator parameters first
+    if (calibrator_ && calibrator_->try_update_parameter(param)) {
+      continue;  // Parameter was handled by CameraCalibrator
+    }
+
     const std::string& name = param.get_name();
     // Update processing parameters dynamically
     if (name == "blur_ksize")
