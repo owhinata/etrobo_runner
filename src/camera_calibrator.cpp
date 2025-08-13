@@ -124,8 +124,8 @@ class CameraCalibrator::Impl {
   bool is_calibration_complete() const { return calibration_complete_; }
   double get_estimated_pitch() const { return estimated_pitch_rad_; }
   double get_camera_height() const { return camera_height_m_; }
-  void draw_visualization_overlay(cv::Mat& img) const;
   bool detect_landmark_in_frame(double& x_full_out, double& v_full_out);
+  void draw_visualization_overlay(cv::Mat& img) const;
 
  private:
   // Internal utility methods
@@ -481,29 +481,6 @@ bool CameraCalibrator::Impl::find_ellipse_edge_based(
   return found;
 }
 
-void CameraCalibrator::Impl::draw_visualization_overlay(cv::Mat& img) const {
-  if (!has_valid_ellipse()) {
-    return;
-  }
-
-  // Draw the detected ellipse in cyan
-  cv::ellipse(img, last_ellipse_full_, cv::Scalar(0, 255, 255), 2);
-
-  // Draw the center point as a red filled circle
-  if (last_circle_valid_) {
-    cv::circle(img,
-               cv::Point(static_cast<int>(last_circle_px_.x),
-                         static_cast<int>(last_circle_px_.y)),
-               5, cv::Scalar(0, 0, 255), -1);
-  }
-
-  // Add calibration info text showing S and V values
-  cv::putText(img,
-              cv::format("Calib: S=%.1f V=%.1f", last_mean_s_, last_mean_v_),
-              cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5,
-              cv::Scalar(0, 255, 255), 1);
-}
-
 bool CameraCalibrator::Impl::detect_landmark_center(double& x_full_out,
                                                     double& v_full_out) {
   if (current_frame_.empty()) {
@@ -663,4 +640,27 @@ void CameraCalibrator::Impl::try_finalize_calibration() {
   RCLCPP_INFO(node_->get_logger(),
               "Calibration complete! Estimated pitch: %.2f deg",
               rad2deg(estimated_pitch_rad_));
+}
+
+void CameraCalibrator::Impl::draw_visualization_overlay(cv::Mat& img) const {
+  if (!has_valid_ellipse()) {
+    return;
+  }
+
+  // Draw the detected ellipse in cyan
+  cv::ellipse(img, last_ellipse_full_, cv::Scalar(0, 255, 255), 2);
+
+  // Draw the center point as a red filled circle
+  if (last_circle_valid_) {
+    cv::circle(img,
+               cv::Point(static_cast<int>(last_circle_px_.x),
+                         static_cast<int>(last_circle_px_.y)),
+               5, cv::Scalar(0, 0, 255), -1);
+  }
+
+  // Add calibration info text showing S and V values
+  cv::putText(img,
+              cv::format("Calib: S=%.1f V=%.1f", last_mean_s_, last_mean_v_),
+              cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5,
+              cv::Scalar(0, 255, 255), 1);
 }
