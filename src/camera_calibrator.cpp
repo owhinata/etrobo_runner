@@ -141,8 +141,6 @@ class CameraCalibrator::Impl {
       const std::vector<std::vector<cv::Point>>& contours,
       const cv::Mat& bgr_img, const cv::Mat& hsv_img, const cv::Mat& mask,
       cv::RotatedRect& best_ellipse);
-  bool find_ellipse_edge_based(const cv::Mat& bgr_img, const cv::Mat& mask,
-                               cv::RotatedRect& best_ellipse);
   void try_finalize_calibration();
 
   // Visualization data access (internal use)
@@ -422,62 +420,6 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
   return found;
 }
 
-bool CameraCalibrator::Impl::find_ellipse_edge_based(
-    const cv::Mat& bgr_img, const cv::Mat& mask,
-    cv::RotatedRect& best_ellipse) {
-  RCLCPP_DEBUG(node_->get_logger(),
-               "No landmark found in contours, trying edge-based detection");
-
-  cv::Mat gray;
-  cv::cvtColor(bgr_img, gray, cv::COLOR_BGR2GRAY);
-  cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.2);
-  cv::Mat edges;
-  cv::Canny(gray, edges, 60, 180, 3, true);
-  cv::bitwise_and(edges, mask, edges);
-  cv::Mat kd = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
-  cv::dilate(edges, edges, kd);
-
-  std::vector<std::vector<cv::Point>> ctr2;
-  cv::findContours(edges, ctr2, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
-
-  auto work_center = cv::Point2f(static_cast<float>(bgr_img.cols) / 2.0f,
-                                 static_cast<float>(bgr_img.rows) / 2.0f);
-  const double max_major =
-      calib_max_major_ratio_ *
-      static_cast<double>(std::min(bgr_img.cols, bgr_img.rows));
-
-  bool found = false;
-  double best_score = std::numeric_limits<double>::infinity();
-
-  for (const auto& cnt : ctr2) {
-    if (cnt.size() < 20) continue;
-    double area2 = cv::contourArea(cnt);
-    if (area2 < 60.0) continue;
-
-    if (cnt.size() >= 5) {
-      cv::RotatedRect e = cv::fitEllipse(cnt);
-      double major = std::max(e.size.width, e.size.height) / 2.0;
-      double minor = std::min(e.size.width, e.size.height) / 2.0;
-      if (major <= 0.0 || minor <= 0.0) continue;
-      if (major > max_major) continue;
-
-      double ratio2 = minor / major;
-      if (ratio2 < 0.2 || ratio2 > 1.3) continue;
-
-      double d = cv::norm(e.center - work_center);
-      double score = d + 0.12 * major;
-
-      if (score < best_score) {
-        best_score = score;
-        best_ellipse = e;
-        found = true;
-      }
-    }
-  }
-
-  return found;
-}
-
 bool CameraCalibrator::Impl::detect_landmark_center(cv::Point2d& landmark_pos) {
   // Reset detection flag at the beginning of each detection attempt
   last_ellipse_valid_ = false;
@@ -520,14 +462,8 @@ bool CameraCalibrator::Impl::detect_landmark_center(cv::Point2d& landmark_pos) {
   bool found =
       find_ellipse_from_contours(contours, work_bgr, hsv, mask, best_ellipse);
 
-  // If no ellipse found, try edge-based detection as fallback
   if (!found) {
-    found = find_ellipse_edge_based(work_bgr, mask, best_ellipse);
-  }
-
-  if (!found) {
-    RCLCPP_DEBUG(node_->get_logger(),
-                 "No landmark found after edge-based detection");
+    RCLCPP_DEBUG(node_->get_logger(), "No landmark found in contours");
     return false;
   }
 
