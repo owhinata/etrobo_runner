@@ -107,7 +107,6 @@ class CameraCalibrator::Impl {
     estimated_pitch_rad_ = std::numeric_limits<double>::quiet_NaN();
 
     // Landmark detection state
-    last_circle_valid_ = false;
     last_ellipse_valid_ = false;
     last_mean_s_ = 0.0;
     last_mean_v_ = 0.0;
@@ -139,7 +138,6 @@ class CameraCalibrator::Impl {
   void try_finalize_calibration();
 
   // Visualization data access (internal use)
-  bool has_valid_circle() const { return last_circle_valid_; }
   bool has_valid_ellipse() const { return last_ellipse_valid_; }
   cv::Point2d get_last_circle() const { return last_circle_px_; }
   cv::RotatedRect get_last_ellipse() const { return last_ellipse_full_; }
@@ -164,7 +162,6 @@ class CameraCalibrator::Impl {
   static constexpr size_t kMaxCalibSamples = 30;
 
   // Detection results for visualization
-  bool last_circle_valid_{false};
   cv::Point2d last_circle_px_{};
   bool last_ellipse_valid_{false};
   cv::RotatedRect last_ellipse_full_{};
@@ -346,7 +343,6 @@ bool CameraCalibrator::Impl::process_frame() {
 
     // Store circle/ellipse data for visualization
     last_circle_px_ = cv::Point2d(x_full_out, v_full_out);
-    last_circle_valid_ = true;
 
     // Try to finalize calibration
     try_finalize_calibration();
@@ -483,8 +479,7 @@ bool CameraCalibrator::Impl::find_ellipse_edge_based(
 
 bool CameraCalibrator::Impl::detect_landmark_center(double& x_full_out,
                                                     double& v_full_out) {
-  // Reset detection flags at the beginning of each detection attempt
-  last_circle_valid_ = false;
+  // Reset detection flag at the beginning of each detection attempt
   last_ellipse_valid_ = false;
 
   if (current_frame_.empty()) {
@@ -660,21 +655,17 @@ void CameraCalibrator::Impl::draw_visualization_overlay(cv::Mat& img) const {
     cv::ellipse(img, last_ellipse_full_, cv::Scalar(0, 255, 255), 2);
 
     // Draw the center point as a red filled circle
-    if (last_circle_valid_) {
-      cv::circle(img,
-                 cv::Point(static_cast<int>(last_circle_px_.x),
-                           static_cast<int>(last_circle_px_.y)),
-                 5, cv::Scalar(0, 0, 255), -1);
-    }
+    cv::circle(img,
+               cv::Point(static_cast<int>(last_circle_px_.x),
+                         static_cast<int>(last_circle_px_.y)),
+               5, cv::Scalar(0, 0, 255), -1);
 
     // Draw line from bottom center (robot position) to landmark center in cyan
-    if (last_circle_valid_) {
-      cv::Point robot_pos(img.cols / 2, img.rows - 1);  // Bottom center
-      cv::Point landmark_pos(static_cast<int>(last_circle_px_.x),
-                             static_cast<int>(last_circle_px_.y));
-      cv::line(img, robot_pos, landmark_pos, cv::Scalar(255, 255, 0),
-               2);  // Cyan line
-    }
+    cv::Point robot_pos(img.cols / 2, img.rows - 1);  // Bottom center
+    cv::Point landmark_pos(static_cast<int>(last_circle_px_.x),
+                           static_cast<int>(last_circle_px_.y));
+    cv::line(img, robot_pos, landmark_pos, cv::Scalar(255, 255, 0),
+             2);  // Cyan line
 
     // Display calibration values: a (angle), r (ratio), v (HSV value), s
     // (saturation)
