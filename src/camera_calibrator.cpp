@@ -483,6 +483,10 @@ bool CameraCalibrator::Impl::find_ellipse_edge_based(
 
 bool CameraCalibrator::Impl::detect_landmark_center(double& x_full_out,
                                                     double& v_full_out) {
+  // Reset detection flags at the beginning of each detection attempt
+  last_circle_valid_ = false;
+  last_ellipse_valid_ = false;
+
   if (current_frame_.empty()) {
     RCLCPP_WARN(node_->get_logger(), "Empty image in detect_landmark_center");
     return false;
@@ -643,24 +647,115 @@ void CameraCalibrator::Impl::try_finalize_calibration() {
 }
 
 void CameraCalibrator::Impl::draw_visualization_overlay(cv::Mat& img) const {
-  if (!has_valid_ellipse()) {
-    return;
+  // Draw ROI rectangle in blue
+  if (!calib_roi_.empty() && calib_roi_.size() == 4) {
+    cv::Rect roi = valid_roi(img, calib_roi_);
+    cv::rectangle(img, roi, cv::Scalar(255, 0, 0),
+                  1);  // Blue rectangle (thinner)
   }
 
-  // Draw the detected ellipse in cyan
-  cv::ellipse(img, last_ellipse_full_, cv::Scalar(0, 255, 255), 2);
+  // Draw detected ellipse and landmark info if available
+  if (has_valid_ellipse()) {
+    // Draw the detected ellipse in yellow
+    cv::ellipse(img, last_ellipse_full_, cv::Scalar(0, 255, 255), 2);
 
-  // Draw the center point as a red filled circle
-  if (last_circle_valid_) {
-    cv::circle(img,
-               cv::Point(static_cast<int>(last_circle_px_.x),
-                         static_cast<int>(last_circle_px_.y)),
-               5, cv::Scalar(0, 0, 255), -1);
+    // Draw the center point as a red filled circle
+    if (last_circle_valid_) {
+      cv::circle(img,
+                 cv::Point(static_cast<int>(last_circle_px_.x),
+                           static_cast<int>(last_circle_px_.y)),
+                 5, cv::Scalar(0, 0, 255), -1);
+    }
+
+    // Draw line from bottom center (robot position) to landmark center in cyan
+    if (last_circle_valid_) {
+      cv::Point robot_pos(img.cols / 2, img.rows - 1);  // Bottom center
+      cv::Point landmark_pos(static_cast<int>(last_circle_px_.x),
+                             static_cast<int>(last_circle_px_.y));
+      cv::line(img, robot_pos, landmark_pos, cv::Scalar(255, 255, 0),
+               2);  // Cyan line
+    }
+
+    // Display calibration values: a (angle), r (ratio), v (HSV value), s
+    // (saturation)
+    std::string calib_text =
+        cv::format("a=%.1f r=%.2f v=%.0f s=%.0f", last_angle_deg_, last_ratio_,
+                   last_mean_v_, last_mean_s_);
+
+    // Calculate text size for background rectangle
+    int baseline = 0;
+    cv::Size text_size = cv::getTextSize(calib_text, cv::FONT_HERSHEY_SIMPLEX,
+                                         0.4, 1, &baseline);
+
+    // Draw semi-transparent background rectangle
+    cv::Point text_pos(static_cast<int>(last_circle_px_.x) + 20,
+                       static_cast<int>(last_circle_px_.y) - 10);
+    cv::Rect text_bg(text_pos.x - 2, text_pos.y - text_size.height - 2,
+                     text_size.width + 4, text_size.height + baseline + 4);
+
+    // Create overlay for semi-transparent effect
+    cv::Mat overlay;
+    img.copyTo(overlay);
+    cv::rectangle(overlay, text_bg, cv::Scalar(0, 0, 0),
+                  -1);                                // Black filled rectangle
+    cv::addWeighted(overlay, 0.2, img, 0.8, 0, img);  // 80% transparency
+
+    cv::putText(img, calib_text, text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.4,
+                cv::Scalar(0, 255, 255), 1);  // Yellow text (smaller font)
   }
 
-  // Add calibration info text showing S and V values
-  cv::putText(img,
-              cv::format("Calib: S=%.1f V=%.1f", last_mean_s_, last_mean_v_),
-              cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 0.5,
-              cv::Scalar(0, 255, 255), 1);
+  // Draw HSV Mask as Picture-in-Picture in top right corner
+  if (!last_calib_hsv_mask_.empty()) {
+    // Calculate PiP size and position (about 1/4 of the image width)
+    int pip_width = img.cols / 4;
+    int pip_height = img.rows / 4;
+    int pip_x = img.cols - pip_width - 10;  // 10 pixels margin from right
+    int pip_y = 10;                         // 10 pixels margin from top
+
+    // Resize the HSV mask to PiP size
+    cv::Mat pip_mask;
+    cv::resize(last_calib_hsv_mask_, pip_mask, cv::Size(pip_width, pip_height));
+
+    // Convert grayscale mask to BGR for overlay
+    cv::Mat pip_bgr;
+    cv::cvtColor(pip_mask, pip_bgr, cv::COLOR_GRAY2BGR);
+
+    // Create ROI in the main image and copy PiP
+    cv::Rect pip_roi(pip_x, pip_y, pip_width, pip_height);
+    pip_bgr.copyTo(img(pip_roi));
+
+    // Draw border around PiP
+    cv::rectangle(img, pip_roi, cv::Scalar(255, 255, 255), 1);  // White border
+
+    // Add "HSV Mask" label inside the PiP area at the top
+    cv::putText(img, "HSV Mask",
+                cv::Point(pip_x + 2, pip_y + 10),  // Move inside the PiP area
+                cv::FONT_HERSHEY_SIMPLEX, 0.4, cv::Scalar(255, 255, 255),
+                1);  // White text
+  }
+
+  // Display distance and pitch info at top left
+  std::string info_text =
+      cv::format("D=%.2fm, pitch=%.1f deg", landmark_distance_m_,
+                 rad2deg(estimated_pitch_rad_));
+
+  // Calculate text size for background rectangle
+  int baseline = 0;
+  cv::Size text_size =
+      cv::getTextSize(info_text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+
+  // Draw semi-transparent background rectangle
+  cv::Point text_pos(10, 30);
+  cv::Rect text_bg(text_pos.x - 2, text_pos.y - text_size.height - 2,
+                   text_size.width + 4, text_size.height + baseline + 4);
+
+  // Create overlay for semi-transparent effect
+  cv::Mat overlay;
+  img.copyTo(overlay);
+  cv::rectangle(overlay, text_bg, cv::Scalar(0, 0, 0),
+                -1);                                // Black filled rectangle
+  cv::addWeighted(overlay, 0.2, img, 0.8, 0, img);  // 80% transparency
+
+  cv::putText(img, info_text, text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.5,
+              cv::Scalar(0, 255, 255), 1);  // Yellow text (smaller font)
 }
