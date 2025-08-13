@@ -42,30 +42,6 @@ static cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi) {
   return cv::Rect(x, y, w, h);
 }
 
-static cv::Mat create_hsv_mask(const cv::Mat& bgr_img, int hsv_v_min,
-                               int hsv_s_max, int hsv_v_max) {
-  cv::Mat hsv;
-  cv::cvtColor(bgr_img, hsv, cv::COLOR_BGR2HSV);
-  cv::Mat mask;
-  cv::inRange(hsv, cv::Scalar(0, 0, hsv_v_min),
-              cv::Scalar(180, hsv_s_max, hsv_v_max), mask);
-
-  // Remove salt-and-pepper noise using median filter (5x5 kernel)
-  cv::medianBlur(mask, mask, 5);
-
-  // Create elliptical structuring element for morphological operations
-  cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-
-  // Opening (erosion followed by dilation): removes small noise regions
-  cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
-
-  // Closing (dilation followed by erosion) x2: fills holes and smooths
-  // boundaries
-  cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
-
-  return mask;
-}
-
 // Implementation class definition
 class CameraCalibrator::Impl {
  public:
@@ -415,39 +391,49 @@ bool CameraCalibrator::Impl::detect_landmark_center(cv::Point2d& landmark_pos) {
     return false;
   }
 
-  // Apply ROI internally
+  // Apply ROI and prepare BGR image
   cv::Rect roi = valid_roi(current_frame_, calib_roi_);
-  cv::Mat work_img = current_frame_(roi).clone();
-  const double scale = 1.0;  // No scaling currently
+  cv::Mat roi_img = current_frame_(roi);  // No clone needed, just a view
+  const double scale = 1.0;               // No scaling currently
 
-  // Convert to BGR if needed
   cv::Mat work_bgr;
-  if (work_img.channels() == 1) {
-    cv::cvtColor(work_img, work_bgr, cv::COLOR_GRAY2BGR);
+  if (roi_img.channels() == 1) {
+    cv::cvtColor(roi_img, work_bgr, cv::COLOR_GRAY2BGR);
+  } else if (roi_img.channels() == 3) {
+    work_bgr = roi_img;  // Direct use of ROI view
   } else {
-    work_bgr = work_img;
+    RCLCPP_ERROR(node_->get_logger(), "Unexpected image channels: %d",
+                 roi_img.channels());
+    return false;
   }
 
-  // Create HSV mask for gray landmark detection
+  // Convert to HSV and create mask for gray landmark detection
   cv::Mat hsv;
   cv::cvtColor(work_bgr, hsv, cv::COLOR_BGR2HSV);
-  cv::Mat mask = create_hsv_mask(work_bgr, calib_hsv_v_min_, calib_hsv_s_max_,
-                                 calib_hsv_v_max_);
 
-  // Store processed HSV mask for debug visualization
-  last_calib_hsv_mask_ = mask.clone();
+  // Use reference to last_calib_hsv_mask_ to avoid copy
+  cv::Mat& mask = last_calib_hsv_mask_;
+  cv::inRange(hsv, cv::Scalar(0, 0, calib_hsv_v_min_),
+              cv::Scalar(180, calib_hsv_s_max_, calib_hsv_v_max_), mask);
 
-  // Find contours in the mask
+  // Apply noise removal and morphological operations:
+  // - Median filter (5x5) to remove salt-and-pepper noise
+  // - Opening to remove small noise regions
+  // - Closing x2 to fill holes and smooth boundaries
+  cv::medianBlur(mask, mask, 5);
+  cv::Mat k = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
+  cv::morphologyEx(mask, mask, cv::MORPH_OPEN, k, cv::Point(-1, -1), 1);
+  cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, k, cv::Point(-1, -1), 2);
+
+  // Find best ellipse from contours
   std::vector<std::vector<cv::Point>> contours;
   cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
   RCLCPP_DEBUG(node_->get_logger(), "Found %zu contours in HSV mask",
                contours.size());
 
-  // Try to find best ellipse from contours
   cv::RotatedRect best_ellipse;
   bool found =
       find_ellipse_from_contours(contours, work_bgr, hsv, mask, best_ellipse);
-
   if (!found) {
     RCLCPP_DEBUG(node_->get_logger(), "No landmark found in contours");
     return false;
