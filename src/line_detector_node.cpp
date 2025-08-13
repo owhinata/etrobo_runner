@@ -255,10 +255,14 @@ void LineDetectorNode::image_callback(
   cv::Mat gray = preprocess_image(msg, original_img, work_img, roi_rect);
   if (gray.empty()) return;
 
+  // Set the current frame for calibrator (used by both calibration and
+  // localization)
+  calibrator_->set_process_frame(original_img);
+
   // Step 2: Calibration phase
   if (state_ == State::Calibrating) {
     RCLCPP_DEBUG(this->get_logger(), "Processing frame in calibration mode");
-    if (calibrator_->process_frame(original_img)) {
+    if (calibrator_->process_frame()) {
       // Calibration completed
       estimated_pitch_rad_ = calibrator_->get_estimated_pitch();
       state_ = State::Localizing;
@@ -279,7 +283,7 @@ void LineDetectorNode::image_callback(
 
   // Step 6: Localization (if calibrated)
   if (state_ == State::Localizing) {
-    perform_localization(segments_out, original_img);
+    perform_localization(segments_out);
   }
 
   // Step 7: Visualization
@@ -411,11 +415,10 @@ void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
 }
 
 void LineDetectorNode::perform_localization(
-    const std::vector<cv::Vec4i>& segments_out, const cv::Mat& original_img) {
+    const std::vector<cv::Vec4i>& segments_out) {
   // Use full-resolution image for detection
   double x_full, v_full;
-  bool found =
-      calibrator_->detect_landmark_center(original_img, x_full, v_full);
+  bool found = calibrator_->detect_landmark_in_frame(x_full, v_full);
 
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
     localization_valid_ = false;

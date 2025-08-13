@@ -121,7 +121,12 @@ bool CameraCalibrator::try_update_parameter(const rclcpp::Parameter& param) {
   // Not a CameraCalibrator parameter
   return false;
 }
-bool CameraCalibrator::process_frame(const cv::Mat& img) {
+
+void CameraCalibrator::set_process_frame(const cv::Mat& img) {
+  current_frame_ = img;
+}
+
+bool CameraCalibrator::process_frame() {
   if (calibration_complete_) {
     return true;  // Already completed
   }
@@ -147,7 +152,7 @@ bool CameraCalibrator::process_frame(const cv::Mat& img) {
 
   // Detect landmark center (ROI is applied internally)
   double x_full_out, v_full_out;
-  if (detect_landmark_center(img, x_full_out, v_full_out)) {
+  if (detect_landmark_center(x_full_out, v_full_out)) {
     // Valid detection: store v coordinate
     v_samples_.push_back(v_full_out);
     RCLCPP_INFO(node_->get_logger(),
@@ -383,17 +388,16 @@ void CameraCalibrator::draw_visualization_overlay(cv::Mat& img) const {
               cv::Scalar(0, 255, 255), 1);
 }
 
-bool CameraCalibrator::detect_landmark_center(const cv::Mat& full_img,
-                                              double& x_full_out,
+bool CameraCalibrator::detect_landmark_center(double& x_full_out,
                                               double& v_full_out) {
-  if (full_img.empty()) {
+  if (current_frame_.empty()) {
     RCLCPP_WARN(node_->get_logger(), "Empty image in detect_landmark_center");
     return false;
   }
 
   // Apply ROI internally
-  cv::Rect roi = valid_roi(full_img, calib_roi_);
-  cv::Mat work_img = full_img(roi).clone();
+  cv::Rect roi = valid_roi(current_frame_, calib_roi_);
+  cv::Mat work_img = current_frame_(roi).clone();
   const double scale = 1.0;  // No scaling currently
 
   // Convert to BGR if needed
@@ -483,6 +487,12 @@ bool CameraCalibrator::detect_landmark_center(const cv::Mat& full_img,
   last_ellipse_valid_ = true;
 
   return true;
+}
+
+bool CameraCalibrator::detect_landmark_in_frame(double& x_full_out,
+                                                double& v_full_out) {
+  // Detect landmark in current frame
+  return detect_landmark_center(x_full_out, v_full_out);
 }
 
 void CameraCalibrator::try_finalize_calibration() {

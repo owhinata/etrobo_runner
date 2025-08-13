@@ -18,8 +18,11 @@ class CameraCalibrator {
   // Try to update a parameter if it belongs to CameraCalibrator
   bool try_update_parameter(const rclcpp::Parameter& param);
 
-  // Main processing method
-  bool process_frame(const cv::Mat& img);
+  // Set the current frame to process
+  void set_process_frame(const cv::Mat& img);
+
+  // Main processing method for calibration
+  bool process_frame();
 
   // State queries
   bool is_calibration_complete() const { return calibration_complete_; }
@@ -31,11 +34,12 @@ class CameraCalibrator {
   // Draw visualization overlay for image_with_lines output
   void draw_visualization_overlay(cv::Mat& img) const;
 
-  bool detect_landmark_center(const cv::Mat& full_img, double& x_full_out,
-                              double& v_full_out);
+  // For localization: detect landmark in current frame
+  bool detect_landmark_in_frame(double& x_full_out, double& v_full_out);
 
  private:
   // Internal utility methods
+  bool detect_landmark_center(double& x_full_out, double& v_full_out);
   cv::Mat create_hsv_mask(const cv::Mat& bgr_img);
   bool find_ellipse_from_contours(
       const std::vector<std::vector<cv::Point>>& contours,
@@ -60,6 +64,9 @@ class CameraCalibrator {
   double get_last_mean_v() const { return last_mean_v_; }
 
   LineDetectorNode* node_;
+
+  // Current frame being processed
+  cv::Mat current_frame_;
 
   // Calibration state
   bool calibration_complete_{false};
