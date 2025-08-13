@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <opencv2/imgproc.hpp>
+#include <vector>
 
 #include "src/line_detector_node.hpp"
 
@@ -24,26 +25,145 @@ static double median(std::vector<double> v) {
   return m;
 }
 
-CameraCalibrator::CameraCalibrator(LineDetectorNode* node) : node_(node) {
-  // Initialize calibration state
-  calib_started_ = false;
-  calibration_complete_ = false;
-  estimated_pitch_rad_ = std::numeric_limits<double>::quiet_NaN();
+// Implementation class definition
+class CameraCalibrator::Impl {
+ public:
+  explicit Impl(LineDetectorNode* node) : node_(node) {
+    // Initialize calibration state
+    calib_started_ = false;
+    calibration_complete_ = false;
+    estimated_pitch_rad_ = std::numeric_limits<double>::quiet_NaN();
 
-  // Landmark detection state
-  last_circle_valid_ = false;
-  last_ellipse_valid_ = false;
-  last_mean_s_ = 0.0;
-  last_mean_v_ = 0.0;
-  last_ratio_ = 0.0;
-  last_angle_deg_ = 0.0;
-  last_fill_ = 0.0;
+    // Landmark detection state
+    last_circle_valid_ = false;
+    last_ellipse_valid_ = false;
+    last_mean_s_ = 0.0;
+    last_mean_v_ = 0.0;
+    last_ratio_ = 0.0;
+    last_angle_deg_ = 0.0;
+    last_fill_ = 0.0;
+  }
 
-  // Declare and initialize parameters
+  // Public interface methods
+  void declare_parameters();
+  bool try_update_parameter(const rclcpp::Parameter& param);
+  void set_process_frame(const cv::Mat& img) { current_frame_ = img; }
+  bool process_frame();
+  bool is_calibration_complete() const { return calibration_complete_; }
+  double get_estimated_pitch() const { return estimated_pitch_rad_; }
+  double get_camera_height() const { return camera_height_m_; }
+  void draw_visualization_overlay(cv::Mat& img) const;
+  bool detect_landmark_in_frame(double& x_full_out, double& v_full_out);
+
+ private:
+  // Internal utility methods
+  bool detect_landmark_center(double& x_full_out, double& v_full_out);
+  cv::Mat create_hsv_mask(const cv::Mat& bgr_img);
+  bool find_ellipse_from_contours(
+      const std::vector<std::vector<cv::Point>>& contours,
+      const cv::Mat& bgr_img, const cv::Mat& hsv_img, const cv::Mat& mask,
+      cv::RotatedRect& best_ellipse);
+  bool find_ellipse_edge_based(const cv::Mat& bgr_img, const cv::Mat& mask,
+                               cv::RotatedRect& best_ellipse);
+  double score_ellipse(const cv::RotatedRect& ellipse, const cv::Mat& bgr_img,
+                       const cv::Mat& hsv_img, const cv::Mat&);
+  cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
+  void try_finalize_calibration();
+
+  // Visualization data access (internal use)
+  bool has_valid_circle() const { return last_circle_valid_; }
+  bool has_valid_ellipse() const { return last_ellipse_valid_; }
+  cv::Point2d get_last_circle() const { return last_circle_px_; }
+  cv::RotatedRect get_last_ellipse() const { return last_ellipse_full_; }
+  cv::Mat get_last_hsv_mask() const { return last_calib_hsv_mask_; }
+  double get_last_angle_deg() const { return last_angle_deg_; }
+  double get_last_ratio() const { return last_ratio_; }
+  double get_last_mean_s() const { return last_mean_s_; }
+  double get_last_mean_v() const { return last_mean_v_; }
+
+  LineDetectorNode* node_;
+
+  // Current frame being processed
+  cv::Mat current_frame_;
+
+  // Calibration state
+  bool calibration_complete_{false};
+  bool calib_started_{false};
+  rclcpp::Time calib_start_time_;
+  double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
+  std::vector<double> v_samples_;
+  static constexpr size_t kMinCalibSamples = 10;
+  static constexpr size_t kMaxCalibSamples = 30;
+
+  // Detection results for visualization
+  bool last_circle_valid_{false};
+  cv::Point2d last_circle_px_{};
+  bool last_ellipse_valid_{false};
+  cv::RotatedRect last_ellipse_full_{};
+  double last_angle_deg_{};
+  double last_ratio_{};
+  double last_mean_s_{};
+  double last_mean_v_{};
+  double last_fill_{};
+  cv::Mat last_calib_hsv_mask_;
+
+  // Calibration parameters (owned by this class)
+  double camera_height_m_;
+  double landmark_distance_m_;
+  double calib_timeout_sec_;
+  std::vector<int64_t> calib_roi_;
+  int calib_hsv_s_max_;
+  int calib_hsv_v_min_;
+  int calib_hsv_v_max_;
+  int calib_min_area_;
+  int calib_min_major_px_;
+  double calib_max_major_ratio_;
+  double calib_fill_min_;
+};
+
+// CameraCalibrator public interface implementation
+CameraCalibrator::CameraCalibrator(LineDetectorNode* node)
+    : pimpl_(std::make_unique<Impl>(node)) {
   declare_parameters();
 }
 
-void CameraCalibrator::declare_parameters() {
+CameraCalibrator::~CameraCalibrator() = default;
+
+void CameraCalibrator::declare_parameters() { pimpl_->declare_parameters(); }
+
+bool CameraCalibrator::try_update_parameter(const rclcpp::Parameter& param) {
+  return pimpl_->try_update_parameter(param);
+}
+
+void CameraCalibrator::set_process_frame(const cv::Mat& img) {
+  pimpl_->set_process_frame(img);
+}
+
+bool CameraCalibrator::process_frame() { return pimpl_->process_frame(); }
+
+bool CameraCalibrator::is_calibration_complete() const {
+  return pimpl_->is_calibration_complete();
+}
+
+double CameraCalibrator::get_estimated_pitch() const {
+  return pimpl_->get_estimated_pitch();
+}
+
+double CameraCalibrator::get_camera_height() const {
+  return pimpl_->get_camera_height();
+}
+
+void CameraCalibrator::draw_visualization_overlay(cv::Mat& img) const {
+  pimpl_->draw_visualization_overlay(img);
+}
+
+bool CameraCalibrator::detect_landmark_in_frame(double& x_full_out,
+                                                double& v_full_out) {
+  return pimpl_->detect_landmark_in_frame(x_full_out, v_full_out);
+}
+
+// Implementation of Impl methods
+void CameraCalibrator::Impl::declare_parameters() {
   // Calibration parameters
   camera_height_m_ =
       node_->declare_parameter<double>("camera_height_meters", 0.2);
@@ -76,7 +196,8 @@ void CameraCalibrator::declare_parameters() {
   calib_fill_min_ = std::max(0.0, std::min(1.0, calib_fill_min_));
 }
 
-bool CameraCalibrator::try_update_parameter(const rclcpp::Parameter& param) {
+bool CameraCalibrator::Impl::try_update_parameter(
+    const rclcpp::Parameter& param) {
   const std::string& name = param.get_name();
 
   // Check if this parameter belongs to CameraCalibrator
@@ -122,11 +243,7 @@ bool CameraCalibrator::try_update_parameter(const rclcpp::Parameter& param) {
   return false;
 }
 
-void CameraCalibrator::set_process_frame(const cv::Mat& img) {
-  current_frame_ = img;
-}
-
-bool CameraCalibrator::process_frame() {
+bool CameraCalibrator::Impl::process_frame() {
   if (calibration_complete_) {
     return true;  // Already completed
   }
@@ -172,8 +289,8 @@ bool CameraCalibrator::process_frame() {
   return calibration_complete_;
 }
 
-cv::Rect CameraCalibrator::valid_roi(const cv::Mat& img,
-                                     const std::vector<int64_t>& roi) {
+cv::Rect CameraCalibrator::Impl::valid_roi(const cv::Mat& img,
+                                           const std::vector<int64_t>& roi) {
   if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
   int x = static_cast<int>(roi[0]);
   int y = static_cast<int>(roi[1]);
@@ -189,7 +306,7 @@ cv::Rect CameraCalibrator::valid_roi(const cv::Mat& img,
   return cv::Rect(x, y, w, h);
 }
 
-cv::Mat CameraCalibrator::create_hsv_mask(const cv::Mat& bgr_img) {
+cv::Mat CameraCalibrator::Impl::create_hsv_mask(const cv::Mat& bgr_img) {
   cv::Mat hsv;
   cv::cvtColor(bgr_img, hsv, cv::COLOR_BGR2HSV);
   cv::Mat mask;
@@ -204,9 +321,10 @@ cv::Mat CameraCalibrator::create_hsv_mask(const cv::Mat& bgr_img) {
   return mask;
 }
 
-double CameraCalibrator::score_ellipse(const cv::RotatedRect& ellipse,
-                                       const cv::Mat& bgr_img,
-                                       const cv::Mat& hsv_img, const cv::Mat&) {
+double CameraCalibrator::Impl::score_ellipse(const cv::RotatedRect& ellipse,
+                                             const cv::Mat& bgr_img,
+                                             const cv::Mat& hsv_img,
+                                             const cv::Mat&) {
   auto work_center = cv::Point2f(static_cast<float>(bgr_img.cols) / 2.0f,
                                  static_cast<float>(bgr_img.rows) / 2.0f);
 
@@ -243,7 +361,7 @@ double CameraCalibrator::score_ellipse(const cv::RotatedRect& ellipse,
   return score;
 }
 
-bool CameraCalibrator::find_ellipse_from_contours(
+bool CameraCalibrator::Impl::find_ellipse_from_contours(
     const std::vector<std::vector<cv::Point>>& contours, const cv::Mat& bgr_img,
     const cv::Mat& hsv_img, const cv::Mat& mask,
     cv::RotatedRect& best_ellipse) {
@@ -310,9 +428,9 @@ bool CameraCalibrator::find_ellipse_from_contours(
   return found;
 }
 
-bool CameraCalibrator::find_ellipse_edge_based(const cv::Mat& bgr_img,
-                                               const cv::Mat& mask,
-                                               cv::RotatedRect& best_ellipse) {
+bool CameraCalibrator::Impl::find_ellipse_edge_based(
+    const cv::Mat& bgr_img, const cv::Mat& mask,
+    cv::RotatedRect& best_ellipse) {
   RCLCPP_DEBUG(node_->get_logger(),
                "No landmark found in contours, trying edge-based detection");
 
@@ -365,7 +483,8 @@ bool CameraCalibrator::find_ellipse_edge_based(const cv::Mat& bgr_img,
 
   return found;
 }
-void CameraCalibrator::draw_visualization_overlay(cv::Mat& img) const {
+
+void CameraCalibrator::Impl::draw_visualization_overlay(cv::Mat& img) const {
   if (!has_valid_ellipse()) {
     return;
   }
@@ -388,8 +507,8 @@ void CameraCalibrator::draw_visualization_overlay(cv::Mat& img) const {
               cv::Scalar(0, 255, 255), 1);
 }
 
-bool CameraCalibrator::detect_landmark_center(double& x_full_out,
-                                              double& v_full_out) {
+bool CameraCalibrator::Impl::detect_landmark_center(double& x_full_out,
+                                                    double& v_full_out) {
   if (current_frame_.empty()) {
     RCLCPP_WARN(node_->get_logger(), "Empty image in detect_landmark_center");
     return false;
@@ -489,13 +608,13 @@ bool CameraCalibrator::detect_landmark_center(double& x_full_out,
   return true;
 }
 
-bool CameraCalibrator::detect_landmark_in_frame(double& x_full_out,
-                                                double& v_full_out) {
+bool CameraCalibrator::Impl::detect_landmark_in_frame(double& x_full_out,
+                                                      double& v_full_out) {
   // Detect landmark in current frame
   return detect_landmark_center(x_full_out, v_full_out);
 }
 
-void CameraCalibrator::try_finalize_calibration() {
+void CameraCalibrator::Impl::try_finalize_calibration() {
   // Timeout check
   if (calib_started_ && calib_timeout_sec_ > 0.0) {
     const rclcpp::Duration elapsed = node_->now() - calib_start_time_;
