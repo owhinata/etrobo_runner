@@ -1,4 +1,4 @@
-// LineDetectorNode implementation
+// LineDetectorNode implementation with pimpl pattern
 
 #include "src/line_detector_node.hpp"
 
@@ -6,10 +6,19 @@
 
 #include <chrono>
 #include <cmath>
+#include <limits>
+#include <mutex>
+#include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
 #include <rclcpp/qos.hpp>
 #include <sensor_msgs/image_encodings.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <string>
+#include <vector>
 
+#include "src/adaptive_line_tracker.hpp"
 #include "src/camera_calibrator.hpp"
 
 using std::placeholders::_1;
@@ -18,14 +27,139 @@ using std::placeholders::_1;
 static inline double deg2rad(double deg) { return deg * CV_PI / 180.0; }
 static inline double rad2deg(double rad) { return rad * 180.0 / CV_PI; }
 
-LineDetectorNode::LineDetectorNode() : Node("etrobo_line_detector") {
-  RCLCPP_INFO(this->get_logger(), "Initializing LineDetectorNode");
+// =======================
+// Implementation class
+// =======================
+class LineDetectorNode::Impl {
+ public:
+  explicit Impl(LineDetectorNode* node);
+  ~Impl() = default;
+
+  void declare_all_parameters();
+  void sanitize_parameters();
+  void setup_publishers();
+  void setup_subscription();
+  void setup_camera_info_subscription();
+  void setup_parameter_callback();
+
+  rcl_interfaces::msg::SetParametersResult on_parameters_set(
+      const std::vector<rclcpp::Parameter>& parameters);
+
+  void camera_info_callback(const sensor_msgs::msg::CameraInfo::SharedPtr msg);
+  void image_callback(const sensor_msgs::msg::Image::ConstSharedPtr msg);
+
+  LineDetectorNode::CameraIntrinsics get_camera_intrinsics() const;
+
+ private:
+  cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
+  cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
+                           cv::Mat& original_img, cv::Mat& work_img,
+                           cv::Rect& roi_rect);
+  cv::Mat extract_black_regions(const cv::Mat& img, const cv::Rect& roi);
+  std::vector<cv::Point2d> track_black_line(const cv::Mat& black_mask,
+                                            const cv::Rect& roi);
+  void publish_lines(const std::vector<cv::Vec4i>& segments_out,
+                     const cv::Rect& roi_rect);
+  void perform_localization(const std::vector<cv::Vec4i>& segments_out,
+                            const cv::Point2d& landmark_pos, bool found);
+  void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
+                             const cv::Mat& original_img, const cv::Mat& edges,
+                             const std::vector<cv::Vec4i>& segments_out,
+                             const cv::Rect& roi_rect);
+
+  // Node reference
+  LineDetectorNode* node_;
+
+  // Subscriptions and publishers
+  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr
+      camera_info_sub_;
+  rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr lines_pub_;
+
+  // Parameter callback
+  rclcpp::Node::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
+
+  // Topics
+  std::string image_topic_;
+  std::string camera_info_topic_;
+
+  // Image preprocessing
+  std::vector<int64_t> roi_;
+  int blur_ksize_;
+  double blur_sigma_;
+
+  // HSV mask
+  bool use_hsv_mask_;
+  int hsv_lower_h_;
+  int hsv_upper_h_;
+  int hsv_lower_s_;
+  int hsv_upper_s_;
+  int hsv_lower_v_;
+  int hsv_upper_v_;
+  int hsv_dilate_kernel_;
+  int hsv_dilate_iter_;
+
+  // Visualization
+  bool publish_image_;
+  bool show_edges_;
+  std::vector<int64_t> draw_color_bgr_;
+  int draw_thickness_;
+
+  // Localization parameters
+  double landmark_map_x_;
+  double landmark_map_y_;
+
+  // Camera intrinsics
+  bool has_cam_info_{false};
+  double fx_{1.0}, fy_{1.0}, cx_{0.0}, cy_{0.0};
+
+  // Processing state
+  State state_{State::Calibrating};
+  double estimated_pitch_rad_{std::numeric_limits<double>::quiet_NaN()};
+
+  // Calibrator instance
+  std::unique_ptr<CameraCalibrator> calibrator_;
+
+  // Adaptive line tracker instance
+  std::unique_ptr<AdaptiveLineTracker> line_tracker_;
+
+  // Localization state
+  bool localization_valid_{false};
+  double last_robot_x_{0.0};
+  double last_robot_y_{0.0};
+  double last_robot_yaw_{0.0};
+
+  // Thread safety
+  std::mutex param_mutex_;
+};
+
+// =======================
+// LineDetectorNode
+// =======================
+LineDetectorNode::LineDetectorNode()
+    : Node("etrobo_line_detector"), pimpl(std::make_unique<Impl>(this)) {
+  RCLCPP_INFO(this->get_logger(), "LineDetectorNode initialized successfully");
+}
+
+LineDetectorNode::~LineDetectorNode() = default;
+
+LineDetectorNode::CameraIntrinsics LineDetectorNode::get_camera_intrinsics()
+    const {
+  return pimpl->get_camera_intrinsics();
+}
+
+// =======================
+// Impl implementation
+// =======================
+LineDetectorNode::Impl::Impl(LineDetectorNode* node) : node_(node) {
+  RCLCPP_INFO(node_->get_logger(), "Initializing LineDetectorNode");
 
   // Declare all parameters
   declare_all_parameters();
 
   // Initialize calibrator
-  calibrator_ = std::make_unique<CameraCalibrator>(this);
+  calibrator_ = std::make_unique<CameraCalibrator>(node_);
 
   // Initialize adaptive line tracker
   line_tracker_ = std::make_unique<AdaptiveLineTracker>();
@@ -35,55 +169,50 @@ LineDetectorNode::LineDetectorNode() : Node("etrobo_line_detector") {
   setup_subscription();
   setup_camera_info_subscription();
   setup_parameter_callback();
-
-  RCLCPP_INFO(this->get_logger(), "LineDetectorNode initialized successfully");
 }
 
-void LineDetectorNode::declare_all_parameters() {
+void LineDetectorNode::Impl::declare_all_parameters() {
   // Topics
   image_topic_ =
-      this->declare_parameter<std::string>("image_topic", "camera/image_raw");
-  camera_info_topic_ = this->declare_parameter<std::string>(
+      node_->declare_parameter<std::string>("image_topic", "camera/image_raw");
+  camera_info_topic_ = node_->declare_parameter<std::string>(
       "camera_info_topic", "camera/camera_info");
 
   // Image preprocessing
-  roi_ = this->declare_parameter<std::vector<int64_t>>("roi",
-                                                       std::vector<int64_t>{});
-  blur_ksize_ = this->declare_parameter<int>("blur_ksize", 5);
-  blur_sigma_ = this->declare_parameter<double>("blur_sigma", 1.2);
-
-  // Note: Edge detection parameters removed - using AdaptiveLineTracker instead
+  roi_ = node_->declare_parameter<std::vector<int64_t>>("roi",
+                                                        std::vector<int64_t>{});
+  blur_ksize_ = node_->declare_parameter<int>("blur_ksize", 5);
+  blur_sigma_ = node_->declare_parameter<double>("blur_sigma", 1.2);
 
   // HSV mask
-  use_hsv_mask_ = this->declare_parameter<bool>("use_hsv_mask", false);
-  hsv_lower_h_ = this->declare_parameter<int>("hsv_lower_h", 0);
-  hsv_upper_h_ = this->declare_parameter<int>("hsv_upper_h", 180);
-  hsv_lower_s_ = this->declare_parameter<int>("hsv_lower_s", 0);
-  hsv_upper_s_ = this->declare_parameter<int>("hsv_upper_s", 255);
-  hsv_lower_v_ = this->declare_parameter<int>("hsv_lower_v", 0);
-  hsv_upper_v_ = this->declare_parameter<int>("hsv_upper_v", 100);
-  hsv_dilate_kernel_ = this->declare_parameter<int>("hsv_dilate_kernel", 3);
-  hsv_dilate_iter_ = this->declare_parameter<int>("hsv_dilate_iter", 1);
+  use_hsv_mask_ = node_->declare_parameter<bool>("use_hsv_mask", false);
+  hsv_lower_h_ = node_->declare_parameter<int>("hsv_lower_h", 0);
+  hsv_upper_h_ = node_->declare_parameter<int>("hsv_upper_h", 180);
+  hsv_lower_s_ = node_->declare_parameter<int>("hsv_lower_s", 0);
+  hsv_upper_s_ = node_->declare_parameter<int>("hsv_upper_s", 255);
+  hsv_lower_v_ = node_->declare_parameter<int>("hsv_lower_v", 0);
+  hsv_upper_v_ = node_->declare_parameter<int>("hsv_upper_v", 100);
+  hsv_dilate_kernel_ = node_->declare_parameter<int>("hsv_dilate_kernel", 3);
+  hsv_dilate_iter_ = node_->declare_parameter<int>("hsv_dilate_iter", 1);
 
   // Visualization
   publish_image_ =
-      this->declare_parameter<bool>("publish_image_with_lines", false);
-  show_edges_ = this->declare_parameter<bool>("show_edges", false);
-  draw_color_bgr_ = this->declare_parameter<std::vector<int64_t>>(
+      node_->declare_parameter<bool>("publish_image_with_lines", false);
+  show_edges_ = node_->declare_parameter<bool>("show_edges", false);
+  draw_color_bgr_ = node_->declare_parameter<std::vector<int64_t>>(
       "draw_color_bgr", {0, 255, 0});
-  draw_thickness_ = this->declare_parameter<int>("draw_thickness", 2);
+  draw_thickness_ = node_->declare_parameter<int>("draw_thickness", 2);
 
   // Localization parameters
-  landmark_map_x_ = this->declare_parameter<double>("landmark_map_x", -0.409);
-  landmark_map_y_ = this->declare_parameter<double>("landmark_map_y", 1.0);
+  landmark_map_x_ = node_->declare_parameter<double>("landmark_map_x", -0.409);
+  landmark_map_y_ = node_->declare_parameter<double>("landmark_map_y", 1.0);
 }
 
-void LineDetectorNode::sanitize_parameters() {
+void LineDetectorNode::Impl::sanitize_parameters() {
   // Clamp to valid ranges
   blur_ksize_ = std::max(1, blur_ksize_);
   if ((blur_ksize_ % 2) == 0) blur_ksize_++;  // Ensure odd kernel size
   blur_sigma_ = std::max(0.0, blur_sigma_);
-  // Edge detection parameters removed - using AdaptiveLineTracker instead
 
   // HSV ranges
   hsv_lower_h_ = std::max(0, std::min(179, hsv_lower_h_));
@@ -106,40 +235,41 @@ void LineDetectorNode::sanitize_parameters() {
   }
 }
 
-void LineDetectorNode::setup_publishers() {
+void LineDetectorNode::Impl::setup_publishers() {
   // Use SensorData QoS but set RELIABLE to interoperate with image_view
   auto pub_qos = rclcpp::SensorDataQoS();
   pub_qos.reliable();
   if (publish_image_) {
-    image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+    image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
         "image_with_lines", pub_qos);
   }
   lines_pub_ =
-      this->create_publisher<std_msgs::msg::Float32MultiArray>("lines", 10);
+      node_->create_publisher<std_msgs::msg::Float32MultiArray>("lines", 10);
 }
 
-void LineDetectorNode::setup_subscription() {
+void LineDetectorNode::Impl::setup_subscription() {
   // Subscription with SensorDataQoS depth=1, best effort
   auto qos = rclcpp::SensorDataQoS();
-  image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
+  image_sub_ = node_->create_subscription<sensor_msgs::msg::Image>(
       image_topic_, qos,
-      std::bind(&LineDetectorNode::image_callback, this, _1));
+      std::bind(&LineDetectorNode::Impl::image_callback, this, _1));
 }
 
-void LineDetectorNode::setup_camera_info_subscription() {
+void LineDetectorNode::Impl::setup_camera_info_subscription() {
   // CameraInfo is low rate; default QoS reliable
-  camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
+  camera_info_sub_ = node_->create_subscription<sensor_msgs::msg::CameraInfo>(
       camera_info_topic_, rclcpp::QoS(10),
-      std::bind(&LineDetectorNode::camera_info_callback, this, _1));
+      std::bind(&LineDetectorNode::Impl::camera_info_callback, this, _1));
 }
 
-void LineDetectorNode::setup_parameter_callback() {
+void LineDetectorNode::Impl::setup_parameter_callback() {
   // Dynamic parameter updates for processing params (not topic/QoS)
-  param_cb_handle_ = this->add_on_set_parameters_callback(std::bind(
-      &LineDetectorNode::on_parameters_set, this, std::placeholders::_1));
+  param_cb_handle_ = node_->add_on_set_parameters_callback(std::bind(
+      &LineDetectorNode::Impl::on_parameters_set, this, std::placeholders::_1));
 }
 
-rcl_interfaces::msg::SetParametersResult LineDetectorNode::on_parameters_set(
+rcl_interfaces::msg::SetParametersResult
+LineDetectorNode::Impl::on_parameters_set(
     const std::vector<rclcpp::Parameter>& parameters) {
   std::lock_guard<std::mutex> lock(param_mutex_);
   for (const auto& param : parameters) {
@@ -163,7 +293,7 @@ rcl_interfaces::msg::SetParametersResult LineDetectorNode::on_parameters_set(
       if (publish_image_ && !image_pub_) {
         auto pub_qos = rclcpp::SensorDataQoS();
         pub_qos.reliable();
-        image_pub_ = this->create_publisher<sensor_msgs::msg::Image>(
+        image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
             "image_with_lines", pub_qos);
       }
     }
@@ -175,7 +305,7 @@ rcl_interfaces::msg::SetParametersResult LineDetectorNode::on_parameters_set(
   return result;
 }
 
-void LineDetectorNode::camera_info_callback(
+void LineDetectorNode::Impl::camera_info_callback(
     const sensor_msgs::msg::CameraInfo::SharedPtr msg) {
   if (msg->k.size() >= 9) {
     fx_ = msg->k[0];
@@ -192,8 +322,13 @@ void LineDetectorNode::camera_info_callback(
   }
 }
 
-cv::Rect LineDetectorNode::valid_roi(const cv::Mat& img,
-                                     const std::vector<int64_t>& roi) {
+LineDetectorNode::CameraIntrinsics
+LineDetectorNode::Impl::get_camera_intrinsics() const {
+  return LineDetectorNode::CameraIntrinsics{has_cam_info_, fx_, fy_, cx_, cy_};
+}
+
+cv::Rect LineDetectorNode::Impl::valid_roi(const cv::Mat& img,
+                                           const std::vector<int64_t>& roi) {
   if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
   int x = static_cast<int>(roi[0]);
   int y = static_cast<int>(roi[1]);
@@ -210,7 +345,7 @@ cv::Rect LineDetectorNode::valid_roi(const cv::Mat& img,
 }
 
 // ===== Main image processing callback =====
-void LineDetectorNode::image_callback(
+void LineDetectorNode::Impl::image_callback(
     const sensor_msgs::msg::Image::ConstSharedPtr msg) {
   const auto t0 = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(param_mutex_);
@@ -221,7 +356,7 @@ void LineDetectorNode::image_callback(
   cv::Mat gray = preprocess_image(msg, original_img, work_img, roi_rect);
   if (gray.empty()) return;
 
-  // Step 2: Detect gray dist
+  // Step 2: Detect gray disk
   cv::Point2d landmark_pos;
   bool found = false;
   if (state_ == State::Calibrating || state_ == State::Localizing) {
@@ -231,7 +366,7 @@ void LineDetectorNode::image_callback(
       // Calibration completed
       estimated_pitch_rad_ = calibrator_->get_estimated_pitch();
       state_ = State::Localizing;
-      RCLCPP_INFO(this->get_logger(), "Calibration complete. Pitch: %.2f deg",
+      RCLCPP_INFO(node_->get_logger(), "Calibration complete. Pitch: %.2f deg",
                   rad2deg(estimated_pitch_rad_));
     }
   }
@@ -261,7 +396,7 @@ void LineDetectorNode::image_callback(
 
   // Debug: Log tracked points
   if (!tracked_points.empty()) {
-    RCLCPP_DEBUG(this->get_logger(),
+    RCLCPP_DEBUG(node_->get_logger(),
                  "Tracked %zu points. First: (%.1f, %.1f), Last: (%.1f, %.1f)",
                  tracked_points.size(), tracked_points.front().x,
                  tracked_points.front().y, tracked_points.back().x,
@@ -300,27 +435,27 @@ void LineDetectorNode::image_callback(
           .count();
 
   if (state_ == State::Localizing && localization_valid_) {
-    RCLCPP_INFO(this->get_logger(),
+    RCLCPP_INFO(node_->get_logger(),
                 "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
                 last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
   } else if (state_ == State::Calibrating) {
-    RCLCPP_DEBUG(this->get_logger(),
+    RCLCPP_DEBUG(node_->get_logger(),
                  "Calibrating: %zu lines detected in %.2f ms",
                  segments_out.size(), ms);
   } else {
-    RCLCPP_INFO(this->get_logger(), "Processed frame: %zu lines in %.2f ms",
+    RCLCPP_INFO(node_->get_logger(), "Processed frame: %zu lines in %.2f ms",
                 segments_out.size(), ms);
   }
 }
 
-cv::Mat LineDetectorNode::preprocess_image(
+cv::Mat LineDetectorNode::Impl::preprocess_image(
     const sensor_msgs::msg::Image::ConstSharedPtr msg, cv::Mat& original_img,
     cv::Mat& work_img, cv::Rect& roi_rect) {
   cv_bridge::CvImagePtr cv_ptr;
   try {
     cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
   } catch (cv_bridge::Exception& e) {
-    RCLCPP_ERROR(this->get_logger(), "cv_bridge exception: %s", e.what());
+    RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
     return cv::Mat();
   }
 
@@ -339,8 +474,8 @@ cv::Mat LineDetectorNode::preprocess_image(
   return gray;
 }
 
-cv::Mat LineDetectorNode::extract_black_regions(const cv::Mat& img,
-                                                const cv::Rect& /*roi*/) {
+cv::Mat LineDetectorNode::Impl::extract_black_regions(const cv::Mat& img,
+                                                      const cv::Rect& /*roi*/) {
   cv::Mat black_mask;
 
   // Convert to HSV if needed
@@ -379,10 +514,10 @@ cv::Mat LineDetectorNode::extract_black_regions(const cv::Mat& img,
   return black_mask;
 }
 
-std::vector<cv::Point2d> LineDetectorNode::track_black_line(
+std::vector<cv::Point2d> LineDetectorNode::Impl::track_black_line(
     const cv::Mat& black_mask, const cv::Rect& roi) {
   if (!line_tracker_) {
-    RCLCPP_WARN(this->get_logger(), "Line tracker not initialized");
+    RCLCPP_WARN(node_->get_logger(), "Line tracker not initialized");
     return std::vector<cv::Point2d>();
   }
 
@@ -401,8 +536,8 @@ std::vector<cv::Point2d> LineDetectorNode::track_black_line(
   return line_tracker_->track_line(black_mask, roi);
 }
 
-void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
-                                     const cv::Rect& roi_rect) {
+void LineDetectorNode::Impl::publish_lines(
+    const std::vector<cv::Vec4i>& segments_out, const cv::Rect& roi_rect) {
   auto msg = std_msgs::msg::Float32MultiArray();
   msg.layout.dim.resize(2);
   msg.layout.dim[0].label = "lines";
@@ -423,7 +558,7 @@ void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
   lines_pub_->publish(msg);
 }
 
-void LineDetectorNode::perform_localization(
+void LineDetectorNode::Impl::perform_localization(
     const std::vector<cv::Vec4i>& segments_out, const cv::Point2d& landmark_pos,
     bool found) {
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
@@ -478,7 +613,7 @@ void LineDetectorNode::perform_localization(
   localization_valid_ = true;
 }
 
-void LineDetectorNode::publish_visualization(
+void LineDetectorNode::Impl::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
     const cv::Mat& original_img, const cv::Mat& edges,
     const std::vector<cv::Vec4i>& segments_out, const cv::Rect& roi_rect) {

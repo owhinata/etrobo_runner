@@ -425,7 +425,8 @@ bool CameraCalibrator::Impl::detect_landmark_center(const cv::Mat& img,
 }
 
 void CameraCalibrator::Impl::try_finalize_calibration() {
-  if (!node_->has_cam_info_) {
+  auto cam_info = node_->get_camera_intrinsics();
+  if (!cam_info.valid) {
     RCLCPP_DEBUG(node_->get_logger(), "Waiting for camera info...");
     return;
   }
@@ -437,7 +438,7 @@ void CameraCalibrator::Impl::try_finalize_calibration() {
 
   const double v_med = median(v_samples_);
   // Compute u = (v - cy)/fy
-  const double u = (v_med - node_->cy_) / node_->fy_;
+  const double u = (v_med - cam_info.cy) / cam_info.fy;
   const double D = landmark_distance_meters_;
   const double h = camera_height_meters_;
   // φ = atan(h/D) - atan(u)

@@ -1,9 +1,104 @@
+// AdaptiveLineTracker implementation with pimpl pattern
+
 #include "src/adaptive_line_tracker.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
+#include <opencv2/opencv.hpp>
+#include <opencv2/video/tracking.hpp>
 
-AdaptiveLineTracker::AdaptiveLineTracker()
+// =======================
+// Implementation class
+// =======================
+class AdaptiveLineTracker::Impl {
+ public:
+  Impl();
+  ~Impl() = default;
+
+  std::vector<cv::Point2d> track_line(const cv::Mat& black_mask,
+                                      const cv::Rect& roi);
+  void reset();
+  double get_confidence() const { return confidence_; }
+  void set_config(const Config& config) { config_ = config; }
+  Config get_config() const { return config_; }
+
+ private:
+  // Segment structure for black regions
+  struct Segment {
+    int start_x;
+    int end_x;
+
+    double center() const { return (start_x + end_x) / 2.0; }
+    double width() const { return end_x - start_x; }
+  };
+
+  // Find black segments in a horizontal scan line
+  std::vector<Segment> find_black_segments(const cv::Mat& mask, int y,
+                                           const cv::Rect& roi);
+
+  // Select the best segment based on previous position and Kalman prediction
+  int select_best_segment(const std::vector<Segment>& segments,
+                          const cv::Point2d& prev_center, double prev_width,
+                          int y);
+
+  // Initialize Kalman filter with first detection
+  void initialize_kalman(const cv::Point2d& point, int y);
+
+  // Check if tracking should be reset based on deviation
+  bool should_reset_tracking(double measured_x, double predicted_x);
+
+  // Smooth the tracked trajectory
+  std::vector<cv::Point2d> smooth_trajectory(
+      const std::vector<cv::Point2d>& points);
+
+  // Update confidence based on tracking quality
+  void update_confidence(bool detection_success, double prediction_error);
+
+  // Member variables
+  cv::KalmanFilter kf_;
+  bool kf_initialized_;
+  std::vector<cv::Point2d> tracked_points_;
+  double confidence_;
+  int consecutive_failures_;
+  int deviation_count_;
+  Config config_;
+
+  // Previous frame data for continuity
+  cv::Point2d prev_center_;
+  double prev_width_;
+};
+
+// =======================
+// AdaptiveLineTracker
+// =======================
+AdaptiveLineTracker::AdaptiveLineTracker() : pimpl(std::make_unique<Impl>()) {}
+
+AdaptiveLineTracker::~AdaptiveLineTracker() = default;
+
+std::vector<cv::Point2d> AdaptiveLineTracker::track_line(
+    const cv::Mat& black_mask, const cv::Rect& roi) {
+  return pimpl->track_line(black_mask, roi);
+}
+
+void AdaptiveLineTracker::reset() { pimpl->reset(); }
+
+double AdaptiveLineTracker::get_confidence() const {
+  return pimpl->get_confidence();
+}
+
+void AdaptiveLineTracker::set_config(const Config& config) {
+  pimpl->set_config(config);
+}
+
+AdaptiveLineTracker::Config AdaptiveLineTracker::get_config() const {
+  return pimpl->get_config();
+}
+
+// =======================
+// Impl implementation
+// =======================
+AdaptiveLineTracker::Impl::Impl()
     : kf_initialized_(false),
       confidence_(0.0),
       consecutive_failures_(0),
@@ -32,7 +127,7 @@ AdaptiveLineTracker::AdaptiveLineTracker()
   cv::setIdentity(kf_.errorCovPost, cv::Scalar::all(1));
 }
 
-void AdaptiveLineTracker::reset() {
+void AdaptiveLineTracker::Impl::reset() {
   kf_initialized_ = false;
   tracked_points_.clear();
   confidence_ = 0.0;
@@ -41,7 +136,7 @@ void AdaptiveLineTracker::reset() {
   prev_width_ = 30.0;
 }
 
-std::vector<cv::Point2d> AdaptiveLineTracker::track_line(
+std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     const cv::Mat& black_mask, const cv::Rect& roi) {
   tracked_points_.clear();
 
@@ -159,7 +254,7 @@ std::vector<cv::Point2d> AdaptiveLineTracker::track_line(
   }
 
   // Apply smoothing if we have enough points
-  if (candidate_points.size() > config_.smooth_window) {
+  if (candidate_points.size() > static_cast<size_t>(config_.smooth_window)) {
     tracked_points_ = smooth_trajectory(candidate_points);
   } else {
     tracked_points_ = candidate_points;
@@ -168,9 +263,9 @@ std::vector<cv::Point2d> AdaptiveLineTracker::track_line(
   return tracked_points_;
 }
 
-std::vector<AdaptiveLineTracker::Segment>
-AdaptiveLineTracker::find_black_segments(const cv::Mat& mask, int y,
-                                         const cv::Rect& roi) {
+std::vector<AdaptiveLineTracker::Impl::Segment>
+AdaptiveLineTracker::Impl::find_black_segments(const cv::Mat& mask, int y,
+                                               const cv::Rect& roi) {
   std::vector<Segment> segments;
 
   // Check if y is within the mask bounds (mask is ROI-cropped)
@@ -212,9 +307,9 @@ AdaptiveLineTracker::find_black_segments(const cv::Mat& mask, int y,
   return segments;
 }
 
-int AdaptiveLineTracker::select_best_segment(
+int AdaptiveLineTracker::Impl::select_best_segment(
     const std::vector<Segment>& segments, const cv::Point2d& prev_center,
-    double prev_width, int y) {
+    double prev_width, int /*y*/) {
   if (segments.empty()) {
     return -1;
   }
@@ -274,7 +369,8 @@ int AdaptiveLineTracker::select_best_segment(
   return best_idx;
 }
 
-void AdaptiveLineTracker::initialize_kalman(const cv::Point2d& point, int y) {
+void AdaptiveLineTracker::Impl::initialize_kalman(const cv::Point2d& point,
+                                                  int /*y*/) {
   // Initialize state: [x, dx/dy]
   // Initially assume vertical line (dx/dy = 0)
   kf_.statePost = (cv::Mat_<float>(2, 1) << point.x, 0);
@@ -289,8 +385,8 @@ void AdaptiveLineTracker::initialize_kalman(const cv::Point2d& point, int y) {
   confidence_ = 0.5;  // Start with medium confidence
 }
 
-bool AdaptiveLineTracker::should_reset_tracking(double measured_x,
-                                                double predicted_x) {
+bool AdaptiveLineTracker::Impl::should_reset_tracking(double measured_x,
+                                                      double predicted_x) {
   if (std::abs(measured_x - predicted_x) > config_.max_lateral_jump) {
     deviation_count_++;
     if (deviation_count_ > 3) {
@@ -310,9 +406,9 @@ bool AdaptiveLineTracker::should_reset_tracking(double measured_x,
   return false;
 }
 
-std::vector<cv::Point2d> AdaptiveLineTracker::smooth_trajectory(
+std::vector<cv::Point2d> AdaptiveLineTracker::Impl::smooth_trajectory(
     const std::vector<cv::Point2d>& points) {
-  if (points.size() < config_.smooth_window) {
+  if (points.size() < static_cast<size_t>(config_.smooth_window)) {
     return points;
   }
 
@@ -345,8 +441,8 @@ std::vector<cv::Point2d> AdaptiveLineTracker::smooth_trajectory(
   return smoothed;
 }
 
-void AdaptiveLineTracker::update_confidence(bool detection_success,
-                                            double prediction_error) {
+void AdaptiveLineTracker::Impl::update_confidence(bool detection_success,
+                                                  double prediction_error) {
   if (detection_success) {
     // Increase confidence based on prediction accuracy
     double error_factor = std::exp(-prediction_error / 10.0);
