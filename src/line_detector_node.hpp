@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "src/adaptive_line_tracker.hpp"
 #include "src/camera_calibrator.hpp"
 
 class LineDetectorNode : public rclcpp::Node {
@@ -43,9 +44,10 @@ class LineDetectorNode : public rclcpp::Node {
                            cv::Mat& original_img, cv::Mat& work_img,
                            cv::Rect& roi_rect);
 
-  cv::Mat detect_edges(const cv::Mat& gray, const cv::Mat& work_img);
+  cv::Mat extract_black_regions(const cv::Mat& img, const cv::Rect& roi);
 
-  void detect_lines(const cv::Mat& edges, std::vector<cv::Vec4i>& segments_out);
+  std::vector<cv::Point2d> track_black_line(const cv::Mat& black_mask,
+                                            const cv::Rect& roi);
 
   void publish_lines(const std::vector<cv::Vec4i>& segments_out,
                      const cv::Rect& roi_rect);
@@ -77,20 +79,7 @@ class LineDetectorNode : public rclcpp::Node {
   int blur_ksize_;
   double blur_sigma_;
 
-  // Edge detection
-  int canny_low_;
-  int canny_high_;
-  int canny_aperture_;
-  bool canny_L2gradient_;
-
-  // Line detection
-  double rho_;
-  double theta_deg_;
-  int threshold_;
-  double min_line_length_;
-  double max_line_gap_;
-  double min_theta_deg_;
-  double max_theta_deg_;
+  // Note: Edge detection parameters removed - using AdaptiveLineTracker instead
 
   // HSV mask
   bool use_hsv_mask_;
@@ -123,6 +112,9 @@ class LineDetectorNode : public rclcpp::Node {
 
   // Calibrator instance
   std::unique_ptr<CameraCalibrator> calibrator_;
+
+  // Adaptive line tracker instance
+  std::unique_ptr<AdaptiveLineTracker> line_tracker_;
 
   // Localization state
   bool localization_valid_{false};

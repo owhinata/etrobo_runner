@@ -20,6 +20,7 @@ add_executable(etrobo_line_detector
   src/main.cpp
   src/line_detector_node.cpp
   src/camera_calibrator.cpp
+  src/adaptive_line_tracker.cpp
 )
 target_include_directories(etrobo_line_detector PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>

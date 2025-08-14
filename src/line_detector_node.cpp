@@ -27,6 +27,9 @@ LineDetectorNode::LineDetectorNode() : Node("etrobo_line_detector") {
   // Initialize calibrator
   calibrator_ = std::make_unique<CameraCalibrator>(this);
 
+  // Initialize adaptive line tracker
+  line_tracker_ = std::make_unique<AdaptiveLineTracker>();
+
   // Setup ROS entities
   setup_publishers();
   setup_subscription();
@@ -49,20 +52,7 @@ void LineDetectorNode::declare_all_parameters() {
   blur_ksize_ = this->declare_parameter<int>("blur_ksize", 5);
   blur_sigma_ = this->declare_parameter<double>("blur_sigma", 1.2);
 
-  // Edge detection
-  canny_low_ = this->declare_parameter<int>("canny_low", 50);
-  canny_high_ = this->declare_parameter<int>("canny_high", 150);
-  canny_aperture_ = this->declare_parameter<int>("canny_aperture", 3);
-  canny_L2gradient_ = this->declare_parameter<bool>("canny_L2gradient", true);
-
-  // Line detection
-  rho_ = this->declare_parameter<double>("rho", 1.0);
-  theta_deg_ = this->declare_parameter<double>("theta_deg", 1.0);
-  threshold_ = this->declare_parameter<int>("threshold", 50);
-  min_line_length_ = this->declare_parameter<double>("min_line_length", 100.0);
-  max_line_gap_ = this->declare_parameter<double>("max_line_gap", 10.0);
-  min_theta_deg_ = this->declare_parameter<double>("min_theta_deg", 0.0);
-  max_theta_deg_ = this->declare_parameter<double>("max_theta_deg", 180.0);
+  // Note: Edge detection parameters removed - using AdaptiveLineTracker instead
 
   // HSV mask
   use_hsv_mask_ = this->declare_parameter<bool>("use_hsv_mask", false);
@@ -93,23 +83,7 @@ void LineDetectorNode::sanitize_parameters() {
   blur_ksize_ = std::max(1, blur_ksize_);
   if ((blur_ksize_ % 2) == 0) blur_ksize_++;  // Ensure odd kernel size
   blur_sigma_ = std::max(0.0, blur_sigma_);
-  canny_low_ = std::max(0, canny_low_);
-  canny_high_ = std::max(canny_low_, canny_high_);
-  canny_aperture_ = std::max(3, canny_aperture_);
-  if ((canny_aperture_ % 2) == 0) canny_aperture_++;
-  if (canny_aperture_ > 7) canny_aperture_ = 7;
-
-  rho_ = std::max(0.1, rho_);
-  theta_deg_ = std::max(0.01, std::min(theta_deg_, 180.0));
-  threshold_ = std::max(1, threshold_);
-  min_line_length_ = std::max(1.0, min_line_length_);
-  max_line_gap_ = std::max(0.0, max_line_gap_);
-
-  if (min_theta_deg_ < 0.0) min_theta_deg_ = 0.0;
-  if (max_theta_deg_ > 180.0) max_theta_deg_ = 180.0;
-  if (min_theta_deg_ > max_theta_deg_) {
-    std::swap(min_theta_deg_, max_theta_deg_);
-  }
+  // Edge detection parameters removed - using AdaptiveLineTracker instead
 
   // HSV ranges
   hsv_lower_h_ = std::max(0, std::min(179, hsv_lower_h_));
@@ -180,14 +154,6 @@ rcl_interfaces::msg::SetParametersResult LineDetectorNode::on_parameters_set(
       blur_ksize_ = param.as_int();
     else if (name == "blur_sigma")
       blur_sigma_ = param.as_double();
-    else if (name == "canny_low")
-      canny_low_ = param.as_int();
-    else if (name == "canny_high")
-      canny_high_ = param.as_int();
-    else if (name == "canny_aperture")
-      canny_aperture_ = param.as_int();
-    else if (name == "canny_L2gradient")
-      canny_L2gradient_ = param.as_bool();
     else if (name == "use_hsv_mask")
       use_hsv_mask_ = param.as_bool();
     else if (name == "show_edges")
@@ -270,12 +236,47 @@ void LineDetectorNode::image_callback(
     }
   }
 
-  // Step 3: Edge detection
-  cv::Mat edges = detect_edges(gray, work_img);
-
-  // Step 4: Line detection
+  // Step 3: Line detection using adaptive tracker
   std::vector<cv::Vec4i> segments_out;
-  detect_lines(edges, segments_out);
+
+  // Extract black regions only from ROI area
+  cv::Mat roi_img = work_img(roi_rect);
+  cv::Mat black_mask = extract_black_regions(roi_img, roi_rect);
+
+  // If landmark (gray disk) is detected, mask it out to help line tracking
+  if (found && landmark_pos.x > 0 && landmark_pos.y > 0) {
+    // Create a circular mask around the landmark to exclude it
+    int landmark_radius = 30;  // Approximate radius of gray disk in pixels
+    cv::Point center(landmark_pos.x - roi_rect.x, landmark_pos.y - roi_rect.y);
+
+    // Check if landmark is within ROI
+    if (center.x >= 0 && center.x < black_mask.cols && center.y >= 0 &&
+        center.y < black_mask.rows) {
+      // Set the landmark area to 0 (not black) so tracker ignores it
+      cv::circle(black_mask, center, landmark_radius, cv::Scalar(0), -1);
+    }
+  }
+
+  auto tracked_points = track_black_line(black_mask, roi_rect);
+
+  // Debug: Log tracked points
+  if (!tracked_points.empty()) {
+    RCLCPP_DEBUG(this->get_logger(),
+                 "Tracked %zu points. First: (%.1f, %.1f), Last: (%.1f, %.1f)",
+                 tracked_points.size(), tracked_points.front().x,
+                 tracked_points.front().y, tracked_points.back().x,
+                 tracked_points.back().y);
+  }
+
+  // Convert tracked points to line segments for compatibility
+  if (tracked_points.size() >= 2) {
+    // Add intermediate segments for better visualization
+    for (size_t i = 1; i < tracked_points.size(); i++) {
+      segments_out.push_back(
+          cv::Vec4i(tracked_points[i - 1].x, tracked_points[i - 1].y,
+                    tracked_points[i].x, tracked_points[i].y));
+    }
+  }
 
   // Step 5: Publish lines data
   publish_lines(segments_out, roi_rect);
@@ -287,7 +288,8 @@ void LineDetectorNode::image_callback(
 
   // Step 7: Visualization
   if (publish_image_ && image_pub_) {
-    publish_visualization(msg, original_img, edges, segments_out, roi_rect);
+    publish_visualization(msg, original_img, black_mask, segments_out,
+                          roi_rect);
   }
 
   // Step 8: Log timing
@@ -337,57 +339,66 @@ cv::Mat LineDetectorNode::preprocess_image(
   return gray;
 }
 
-cv::Mat LineDetectorNode::detect_edges(const cv::Mat& gray,
-                                       const cv::Mat& work_img) {
-  cv::Mat edges;
-  cv::Canny(gray, edges, canny_low_, canny_high_, canny_aperture_,
-            canny_L2gradient_);
+cv::Mat LineDetectorNode::extract_black_regions(const cv::Mat& img,
+                                                const cv::Rect& /*roi*/) {
+  cv::Mat black_mask;
 
-  if (use_hsv_mask_) {
-    cv::Mat hsv;
-    cv::cvtColor(work_img, hsv, cv::COLOR_BGR2HSV);
-    cv::Mat hsv_mask;
-    cv::inRange(hsv, cv::Scalar(hsv_lower_h_, hsv_lower_s_, hsv_lower_v_),
-                cv::Scalar(hsv_upper_h_, hsv_upper_s_, hsv_upper_v_), hsv_mask);
-
-    if (hsv_dilate_kernel_ > 0 && hsv_dilate_iter_ > 0) {
-      cv::Mat kernel = cv::getStructuringElement(
-          cv::MORPH_RECT, cv::Size(hsv_dilate_kernel_, hsv_dilate_kernel_));
-      cv::dilate(hsv_mask, hsv_mask, kernel, cv::Point(-1, -1),
-                 hsv_dilate_iter_);
-    }
-
-    cv::bitwise_and(edges, hsv_mask, edges);
+  // Convert to HSV if needed
+  cv::Mat hsv;
+  if (img.channels() == 3) {
+    cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
+  } else {
+    // For grayscale, create pseudo-HSV with V channel only
+    cv::Mat channels[3];
+    channels[0] = cv::Mat::zeros(img.size(), CV_8UC1);  // H = 0
+    channels[1] = cv::Mat::zeros(img.size(), CV_8UC1);  // S = 0
+    channels[2] = img;                                  // V = grayscale value
+    cv::merge(channels, 3, hsv);
   }
 
-  return edges;
+  // Extract black regions (low V value)
+  // Black line typically has V < 50-80 depending on lighting
+  cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(180, 255, hsv_upper_v_),
+              black_mask);
+
+  // Apply morphological operations to clean up
+  if (hsv_dilate_iter_ > 0 && hsv_dilate_kernel_ > 0) {
+    cv::Mat kernel = cv::getStructuringElement(
+        cv::MORPH_RECT, cv::Size(hsv_dilate_kernel_, hsv_dilate_kernel_));
+
+    // Remove small noise first
+    cv::morphologyEx(black_mask, black_mask, cv::MORPH_OPEN, kernel);
+
+    // Then close small gaps in the line
+    cv::morphologyEx(black_mask, black_mask, cv::MORPH_CLOSE, kernel);
+
+    // Additional erosion to remove edge noise
+    cv::erode(black_mask, black_mask, kernel, cv::Point(-1, -1), 1);
+  }
+
+  return black_mask;
 }
 
-void LineDetectorNode::detect_lines(const cv::Mat& edges,
-                                    std::vector<cv::Vec4i>& segments_out) {
-  const double theta_rad = deg2rad(theta_deg_);
-  const double min_theta_rad = deg2rad(min_theta_deg_);
-  const double max_theta_rad = deg2rad(max_theta_deg_);
-
-  if (min_theta_rad < max_theta_rad) {
-    cv::HoughLinesP(edges, segments_out, rho_, theta_rad, threshold_,
-                    min_line_length_, max_line_gap_);
-
-    // Filter by angle
-    segments_out.erase(
-        std::remove_if(segments_out.begin(), segments_out.end(),
-                       [min_theta_rad, max_theta_rad](const cv::Vec4i& line) {
-                         int dx = line[2] - line[0];
-                         int dy = line[3] - line[1];
-                         double angle = std::atan2(std::abs(dy), std::abs(dx));
-                         return (angle < min_theta_rad) ||
-                                (angle > max_theta_rad);
-                       }),
-        segments_out.end());
-  } else {
-    cv::HoughLinesP(edges, segments_out, rho_, theta_rad, threshold_,
-                    min_line_length_, max_line_gap_);
+std::vector<cv::Point2d> LineDetectorNode::track_black_line(
+    const cv::Mat& black_mask, const cv::Rect& roi) {
+  if (!line_tracker_) {
+    RCLCPP_WARN(this->get_logger(), "Line tracker not initialized");
+    return std::vector<cv::Point2d>();
   }
+
+  // Configure tracker if needed (can be made dynamic via parameters)
+  AdaptiveLineTracker::Config config;
+  config.max_line_width = 80.0;    // Reduced: black line shouldn't be too wide
+  config.min_line_width = 20.0;    // Increased: filter out thin noise
+  config.max_lateral_jump = 20.0;  // Reduced: line shouldn't jump too much
+  config.scan_step = 5;
+  config.position_weight = 0.5;  // Increase weight for position continuity
+  config.prediction_weight = 0.3;
+  config.width_weight = 0.2;
+  line_tracker_->set_config(config);
+
+  // Track the line
+  return line_tracker_->track_line(black_mask, roi);
 }
 
 void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
