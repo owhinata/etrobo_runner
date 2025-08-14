@@ -55,8 +55,8 @@ class LineDetectorParameterGUI:
         self.update_thread.start()
 
         # Fetch initial parameters from node (after GUI is setup)
-        # Delay to ensure ROS is ready
-        self.root.after(2000, self.fetch_initial_parameters)
+        # Delay to ensure ROS is ready and node is running
+        self.root.after(3000, self.fetch_initial_parameters)
 
     def setup_gui(self):
         """Setup the main GUI layout"""
@@ -154,7 +154,7 @@ class LineDetectorParameterGUI:
             "I/O Settings": {
                 "image_topic": {"type": "string", "default": "camera/image_raw"},
                 "publish_image_with_lines": {"type": "bool", "default": True},
-                "show_black_mask": {"type": "bool", "default": False}
+                "show_edges": {"type": "bool", "default": False}
             },
             "Pre-processing": {
                 "blur_ksize": {"type": "int", "default": 5, "min": 1, "max": 21, "step": 2},
@@ -167,16 +167,14 @@ class LineDetectorParameterGUI:
             },
             "Black Line Detection": {
                 "use_hsv_mask": {"type": "bool", "default": True},
+                "hsv_lower_h": {"type": "int", "default": 0, "min": 0, "max": 180},
+                "hsv_lower_s": {"type": "int", "default": 0, "min": 0, "max": 255},
+                "hsv_lower_v": {"type": "int", "default": 0, "min": 0, "max": 255},
+                "hsv_upper_h": {"type": "int", "default": 180, "min": 0, "max": 180},
+                "hsv_upper_s": {"type": "int", "default": 255, "min": 0, "max": 255},
                 "hsv_upper_v": {"type": "int", "default": 80, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
                 "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
-            },
-            "Adaptive Line Tracker": {
-                "tracker_max_line_width": {"type": "double", "default": 80.0, "min": 10.0, "max": 200.0},
-                "tracker_min_line_width": {"type": "double", "default": 20.0, "min": 5.0, "max": 100.0},
-                "tracker_max_lateral_jump": {"type": "double", "default": 20.0, "min": 5.0, "max": 100.0},
-                "tracker_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
-                "tracker_smooth_window": {"type": "int", "default": 3, "min": 1, "max": 11, "step": 2}
             },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
@@ -281,16 +279,19 @@ class LineDetectorParameterGUI:
     def setup_ros(self):
         """Setup ROS2 node and connections"""
         def ros_thread():
-            rclpy.init()
-            self.ros_node = LineDetectorGUINode(self.image_callback)
             try:
+                rclpy.init()
+                self.ros_node = LineDetectorGUINode(self.image_callback)
                 rclpy.spin(self.ros_node)
             except Exception as e:
                 print(f"ROS error: {e}")
             finally:
                 if self.ros_node:
                     self.ros_node.destroy_node()
-                rclpy.shutdown()
+                try:
+                    rclpy.shutdown()
+                except:
+                    pass  # Ignore shutdown errors
 
         self.ros_thread = threading.Thread(target=ros_thread, daemon=True)
         self.ros_thread.start()
@@ -430,21 +431,27 @@ class LineDetectorParameterGUI:
 
         # Add ROI array parameters
         param_names.extend(['roi', 'calib_roi'])
+        
+        print(f"Attempting to fetch {len(param_names)} parameters from node...")
+        print(f"Parameter names: {param_names[:10]}...")  # Show first 10 for debugging
 
         # Get parameters from node
         fetched_params = self.ros_node.get_parameters_from_node(param_names)
 
         if fetched_params:
-            print(f"Fetched {len(fetched_params)} parameters from node")
+            print(f"Successfully fetched {len(fetched_params)} parameters from node")
+            # Note: 'fetch' status label doesn't exist, using 'connection' instead
             self.update_status(
-                'fetch', f"Loaded {len(fetched_params)} parameters from node")
+                'connection', f"Connected - Loaded {len(fetched_params)} parameters")
 
             # Update GUI widgets and internal parameters
+            updated_count = 0
             for param_name, value in fetched_params.items():
                 if param_name in self.parameter_widgets:
                     try:
                         self.parameter_widgets[param_name].set(value)
                         self.parameters[param_name] = value
+                        updated_count += 1
 
                         # Update value label for scale widgets
                         if f"{param_name}_label" in self.parameter_widgets:
@@ -453,10 +460,11 @@ class LineDetectorParameterGUI:
                     except tk.TclError as e:
                         print(
                             f"Warning: Failed to set parameter {param_name}={value}: {e}")
+            print(f"Updated {updated_count} GUI widgets with node parameters")
         else:
             print("Warning: No parameters fetched from node, using defaults")
             self.update_status(
-                'fetch', "Using default parameters (node not accessible)")
+                'connection', "Connected - Using default parameters")
 
     def parameter_changed(self, param_name: str, value: Any):
         """Handle parameter changes"""
@@ -586,13 +594,8 @@ class LineDetectorGUINode(Node):
             roi_param_name = 'roi'
             components = ['roi_x', 'roi_y', 'roi_w', 'roi_h']
 
-        # Get all current values
-        roi_values = []
-        for comp in components:
-            if comp in self.parameters:
-                roi_values.append(int(self.parameters[comp]))
-            else:
-                roi_values.append(-1)  # default value
+        # Get all current values - use default values since we don't track them here
+        roi_values = [-1, -1, -1, -1]  # default values
 
         # Create array parameter
         param = Parameter()
@@ -609,9 +612,15 @@ class LineDetectorGUINode(Node):
 
     def get_parameters_from_node(self, param_names: list) -> dict:
         """Get parameters from the target node"""
-        if not self.param_get_client.service_is_ready():
-            self.get_logger().warn("Parameter get service not ready")
-            return {}
+        # Wait a bit for service to be ready
+        timeout_start = time.time()
+        while not self.param_get_client.service_is_ready():
+            if time.time() - timeout_start > 3.0:
+                self.get_logger().warn("Parameter get service not ready after 3 seconds")
+                return {}
+            time.sleep(0.1)
+        
+        self.get_logger().info(f"Parameter service is ready, fetching {len(param_names)} parameters")
 
         request = GetParameters.Request()
         request.names = param_names
