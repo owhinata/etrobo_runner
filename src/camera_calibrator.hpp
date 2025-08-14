@@ -19,11 +19,8 @@ class CameraCalibrator {
   // Try to update a parameter if it belongs to CameraCalibrator
   bool try_update_parameter(const rclcpp::Parameter& param);
 
-  // Set the current frame to process
-  void set_process_frame(const cv::Mat& img);
-
   // Main processing method for calibration
-  bool process_frame();
+  bool process_frame(const cv::Mat& img, cv::Point2d& landmark_pos);
 
   // State queries
   bool is_calibration_complete() const;
@@ -34,9 +31,6 @@ class CameraCalibrator {
 
   // Draw visualization overlay for image_with_lines output
   void draw_visualization_overlay(cv::Mat& img) const;
-
-  // For localization: detect landmark in current frame
-  bool detect_landmark_in_frame(cv::Point2d& landmark_pos);
 
  private:
   // Forward declaration of implementation class

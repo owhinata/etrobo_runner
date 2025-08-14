@@ -50,11 +50,11 @@ class LineDetectorNode : public rclcpp::Node {
   void publish_lines(const std::vector<cv::Vec4i>& segments_out,
                      const cv::Rect& roi_rect);
 
-  void perform_localization(const std::vector<cv::Vec4i>& segments_out);
+  void perform_localization(const std::vector<cv::Vec4i>& segments_out,
+                            const cv::Point2d& landmark_pos, bool found);
 
   void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
-                             const cv::Mat& original_img,
-                             const cv::Mat& work_img, const cv::Mat& edges,
+                             const cv::Mat& original_img, const cv::Mat& edges,
                              const std::vector<cv::Vec4i>& segments_out,
                              const cv::Rect& roi_rect);
 

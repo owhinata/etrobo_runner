@@ -255,14 +255,13 @@ void LineDetectorNode::image_callback(
   cv::Mat gray = preprocess_image(msg, original_img, work_img, roi_rect);
   if (gray.empty()) return;
 
-  // Set the current frame for calibrator (used by both calibration and
-  // localization)
-  calibrator_->set_process_frame(original_img);
-
-  // Step 2: Calibration phase
-  if (state_ == State::Calibrating) {
-    RCLCPP_DEBUG(this->get_logger(), "Processing frame in calibration mode");
-    if (calibrator_->process_frame()) {
+  // Step 2: Detect gray dist
+  cv::Point2d landmark_pos;
+  bool found = false;
+  if (state_ == State::Calibrating || state_ == State::Localizing) {
+    found = calibrator_->process_frame(original_img, landmark_pos);
+    if (state_ == State::Calibrating &&
+        calibrator_->is_calibration_complete()) {
       // Calibration completed
       estimated_pitch_rad_ = calibrator_->get_estimated_pitch();
       state_ = State::Localizing;
@@ -283,13 +282,12 @@ void LineDetectorNode::image_callback(
 
   // Step 6: Localization (if calibrated)
   if (state_ == State::Localizing) {
-    perform_localization(segments_out);
+    perform_localization(segments_out, landmark_pos, found);
   }
 
   // Step 7: Visualization
   if (publish_image_ && image_pub_) {
-    publish_visualization(msg, original_img, work_img, edges, segments_out,
-                          roi_rect);
+    publish_visualization(msg, original_img, edges, segments_out, roi_rect);
   }
 
   // Step 8: Log timing
@@ -415,11 +413,8 @@ void LineDetectorNode::publish_lines(const std::vector<cv::Vec4i>& segments_out,
 }
 
 void LineDetectorNode::perform_localization(
-    const std::vector<cv::Vec4i>& segments_out) {
-  // Use full-resolution image for detection
-  cv::Point2d landmark_pos;
-  bool found = calibrator_->detect_landmark_in_frame(landmark_pos);
-
+    const std::vector<cv::Vec4i>& segments_out, const cv::Point2d& landmark_pos,
+    bool found) {
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
     localization_valid_ = false;
     return;
@@ -474,7 +469,7 @@ void LineDetectorNode::perform_localization(
 
 void LineDetectorNode::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
-    const cv::Mat& original_img, const cv::Mat& work_img, const cv::Mat& edges,
+    const cv::Mat& original_img, const cv::Mat& edges,
     const std::vector<cv::Vec4i>& segments_out, const cv::Rect& roi_rect) {
   cv::Mat output_img;
   if (show_edges_) {
