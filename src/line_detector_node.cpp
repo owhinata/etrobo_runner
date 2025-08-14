@@ -27,6 +27,23 @@ using std::placeholders::_1;
 static inline double deg2rad(double deg) { return deg * CV_PI / 180.0; }
 static inline double rad2deg(double rad) { return rad * 180.0 / CV_PI; }
 
+// Helper function for ROI validation
+static cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi) {
+  if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
+  int x = static_cast<int>(roi[0]);
+  int y = static_cast<int>(roi[1]);
+  int w = static_cast<int>(roi[2]);
+  int h = static_cast<int>(roi[3]);
+  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+    return cv::Rect(0, 0, img.cols, img.rows);
+  }
+  x = std::max(0, std::min(x, img.cols - 1));
+  y = std::max(0, std::min(y, img.rows - 1));
+  w = std::min(w, img.cols - x);
+  h = std::min(h, img.rows - y);
+  return cv::Rect(x, y, w, h);
+}
+
 // =======================
 // Implementation class
 // =======================
@@ -51,20 +68,15 @@ class LineDetectorNode::Impl {
   LineDetectorNode::CameraIntrinsics get_camera_intrinsics() const;
 
  private:
-  cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi);
-  cv::Mat preprocess_image(const sensor_msgs::msg::Image::ConstSharedPtr msg,
-                           cv::Mat& original_img, cv::Mat& work_img,
-                           cv::Rect& roi_rect);
-  cv::Mat extract_black_regions(const cv::Mat& img, const cv::Rect& roi);
-  std::vector<cv::Point2d> track_black_line(const cv::Mat& black_mask,
-                                            const cv::Rect& roi);
-  void publish_lines(const std::vector<cv::Vec4i>& segments_out,
+  cv::Mat extract_black_regions(const cv::Mat& img);
+  void configure_line_tracker();  // Helper to configure tracker parameters
+  void publish_lines(const std::vector<cv::Point2d>& tracked_points,
                      const cv::Rect& roi_rect);
-  void perform_localization(const std::vector<cv::Vec4i>& segments_out,
+  void perform_localization(const std::vector<cv::Point2d>& tracked_points,
                             const cv::Point2d& landmark_pos, bool found);
   void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
                              const cv::Mat& original_img, const cv::Mat& edges,
-                             const std::vector<cv::Vec4i>& segments_out,
+                             const std::vector<cv::Point2d>& tracked_points,
                              const cv::Rect& roi_rect);
 
   // Node reference
@@ -86,25 +98,15 @@ class LineDetectorNode::Impl {
 
   // Image preprocessing
   std::vector<int64_t> roi_;
-  int blur_ksize_;
-  double blur_sigma_;
 
-  // HSV mask
-  bool use_hsv_mask_;
-  int hsv_lower_h_;
-  int hsv_upper_h_;
-  int hsv_lower_s_;
-  int hsv_upper_s_;
-  int hsv_lower_v_;
-  int hsv_upper_v_;
+  // HSV mask (only parameters actually used for black line detection)
+  int hsv_upper_v_;  // Upper threshold for V channel to detect black
   int hsv_dilate_kernel_;
   int hsv_dilate_iter_;
 
   // Visualization
   bool publish_image_;
   bool show_edges_;
-  std::vector<int64_t> draw_color_bgr_;
-  int draw_thickness_;
 
   // Localization parameters
   double landmark_map_x_;
@@ -181,16 +183,8 @@ void LineDetectorNode::Impl::declare_all_parameters() {
   // Image preprocessing
   roi_ = node_->declare_parameter<std::vector<int64_t>>("roi",
                                                         std::vector<int64_t>{});
-  blur_ksize_ = node_->declare_parameter<int>("blur_ksize", 5);
-  blur_sigma_ = node_->declare_parameter<double>("blur_sigma", 1.2);
 
-  // HSV mask
-  use_hsv_mask_ = node_->declare_parameter<bool>("use_hsv_mask", false);
-  hsv_lower_h_ = node_->declare_parameter<int>("hsv_lower_h", 0);
-  hsv_upper_h_ = node_->declare_parameter<int>("hsv_upper_h", 180);
-  hsv_lower_s_ = node_->declare_parameter<int>("hsv_lower_s", 0);
-  hsv_upper_s_ = node_->declare_parameter<int>("hsv_upper_s", 255);
-  hsv_lower_v_ = node_->declare_parameter<int>("hsv_lower_v", 0);
+  // HSV mask (only parameters actually used for black line detection)
   hsv_upper_v_ = node_->declare_parameter<int>("hsv_upper_v", 100);
   hsv_dilate_kernel_ = node_->declare_parameter<int>("hsv_dilate_kernel", 3);
   hsv_dilate_iter_ = node_->declare_parameter<int>("hsv_dilate_iter", 1);
@@ -199,9 +193,6 @@ void LineDetectorNode::Impl::declare_all_parameters() {
   publish_image_ =
       node_->declare_parameter<bool>("publish_image_with_lines", false);
   show_edges_ = node_->declare_parameter<bool>("show_edges", false);
-  draw_color_bgr_ = node_->declare_parameter<std::vector<int64_t>>(
-      "draw_color_bgr", {0, 255, 0});
-  draw_thickness_ = node_->declare_parameter<int>("draw_thickness", 2);
 
   // Localization parameters
   landmark_map_x_ = node_->declare_parameter<double>("landmark_map_x", -0.409);
@@ -209,30 +200,10 @@ void LineDetectorNode::Impl::declare_all_parameters() {
 }
 
 void LineDetectorNode::Impl::sanitize_parameters() {
-  // Clamp to valid ranges
-  blur_ksize_ = std::max(1, blur_ksize_);
-  if ((blur_ksize_ % 2) == 0) blur_ksize_++;  // Ensure odd kernel size
-  blur_sigma_ = std::max(0.0, blur_sigma_);
-
-  // HSV ranges
-  hsv_lower_h_ = std::max(0, std::min(179, hsv_lower_h_));
-  hsv_upper_h_ = std::max(0, std::min(180, hsv_upper_h_));
-  hsv_lower_s_ = std::max(0, std::min(255, hsv_lower_s_));
-  hsv_upper_s_ = std::max(0, std::min(255, hsv_upper_s_));
-  hsv_lower_v_ = std::max(0, std::min(255, hsv_lower_v_));
+  // HSV ranges (only parameters actually used)
   hsv_upper_v_ = std::max(0, std::min(255, hsv_upper_v_));
-
   hsv_dilate_kernel_ = std::max(0, hsv_dilate_kernel_);
   hsv_dilate_iter_ = std::max(0, hsv_dilate_iter_);
-
-  // Draw parameters
-  draw_thickness_ = std::max(1, draw_thickness_);
-  if (draw_color_bgr_.size() != 3) {
-    draw_color_bgr_ = {0, 255, 0};  // Default green
-  }
-  for (auto& c : draw_color_bgr_) {
-    c = std::max(int64_t(0), std::min(int64_t(255), c));
-  }
 }
 
 void LineDetectorNode::Impl::setup_publishers() {
@@ -280,12 +251,12 @@ LineDetectorNode::Impl::on_parameters_set(
 
     const std::string& name = param.get_name();
     // Update processing parameters dynamically
-    if (name == "blur_ksize")
-      blur_ksize_ = param.as_int();
-    else if (name == "blur_sigma")
-      blur_sigma_ = param.as_double();
-    else if (name == "use_hsv_mask")
-      use_hsv_mask_ = param.as_bool();
+    if (name == "hsv_upper_v")
+      hsv_upper_v_ = param.as_int();
+    else if (name == "hsv_dilate_kernel")
+      hsv_dilate_kernel_ = param.as_int();
+    else if (name == "hsv_dilate_iter")
+      hsv_dilate_iter_ = param.as_int();
     else if (name == "show_edges")
       show_edges_ = param.as_bool();
     else if (name == "publish_image_with_lines") {
@@ -296,8 +267,12 @@ LineDetectorNode::Impl::on_parameters_set(
         image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
             "image_with_lines", pub_qos);
       }
-    }
-    // ... Add other parameters as needed
+    } else if (name == "roi")
+      roi_ = param.as_integer_array();
+    else if (name == "landmark_map_x")
+      landmark_map_x_ = param.as_double();
+    else if (name == "landmark_map_y")
+      landmark_map_y_ = param.as_double();
   }
   sanitize_parameters();
   rcl_interfaces::msg::SetParametersResult result;
@@ -327,34 +302,24 @@ LineDetectorNode::Impl::get_camera_intrinsics() const {
   return LineDetectorNode::CameraIntrinsics{has_cam_info_, fx_, fy_, cx_, cy_};
 }
 
-cv::Rect LineDetectorNode::Impl::valid_roi(const cv::Mat& img,
-                                           const std::vector<int64_t>& roi) {
-  if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
-  int x = static_cast<int>(roi[0]);
-  int y = static_cast<int>(roi[1]);
-  int w = static_cast<int>(roi[2]);
-  int h = static_cast<int>(roi[3]);
-  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
-    return cv::Rect(0, 0, img.cols, img.rows);
-  }
-  x = std::max(0, std::min(x, img.cols - 1));
-  y = std::max(0, std::min(y, img.rows - 1));
-  w = std::min(w, img.cols - x);
-  h = std::min(h, img.rows - y);
-  return cv::Rect(x, y, w, h);
-}
-
 // ===== Main image processing callback =====
 void LineDetectorNode::Impl::image_callback(
     const sensor_msgs::msg::Image::ConstSharedPtr msg) {
   const auto t0 = std::chrono::steady_clock::now();
   std::lock_guard<std::mutex> lock(param_mutex_);
 
-  // Step 1: Preprocess the image
-  cv::Mat original_img, work_img;
-  cv::Rect roi_rect;
-  cv::Mat gray = preprocess_image(msg, original_img, work_img, roi_rect);
-  if (gray.empty()) return;
+  // Step 1: Convert ROS image to OpenCV format
+  cv_bridge::CvImagePtr cv_ptr;
+  try {
+    cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
+  } catch (cv_bridge::Exception& e) {
+    RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
+    return;
+  }
+
+  cv::Mat original_img = cv_ptr->image;
+  cv::Rect roi_rect = valid_roi(original_img, roi_);
+  cv::Mat work_img = original_img(roi_rect).clone();
 
   // Step 2: Detect gray disk
   cv::Point2d landmark_pos;
@@ -372,27 +337,13 @@ void LineDetectorNode::Impl::image_callback(
   }
 
   // Step 3: Line detection using adaptive tracker
-  std::vector<cv::Vec4i> segments_out;
+  // Extract black regions only from ROI area (work_img is already ROI-cropped)
+  cv::Mat black_mask = extract_black_regions(work_img);
 
-  // Extract black regions only from ROI area
-  cv::Mat roi_img = work_img(roi_rect);
-  cv::Mat black_mask = extract_black_regions(roi_img, roi_rect);
-
-  // If landmark (gray disk) is detected, mask it out to help line tracking
-  if (found && landmark_pos.x > 0 && landmark_pos.y > 0) {
-    // Create a circular mask around the landmark to exclude it
-    int landmark_radius = 30;  // Approximate radius of gray disk in pixels
-    cv::Point center(landmark_pos.x - roi_rect.x, landmark_pos.y - roi_rect.y);
-
-    // Check if landmark is within ROI
-    if (center.x >= 0 && center.x < black_mask.cols && center.y >= 0 &&
-        center.y < black_mask.rows) {
-      // Set the landmark area to 0 (not black) so tracker ignores it
-      cv::circle(black_mask, center, landmark_radius, cv::Scalar(0), -1);
-    }
-  }
-
-  auto tracked_points = track_black_line(black_mask, roi_rect);
+  // Configure and track the black line (gray disk is already excluded by HSV
+  // thresholding)
+  configure_line_tracker();
+  auto tracked_points = line_tracker_->track_line(black_mask, roi_rect);
 
   // Debug: Log tracked points
   if (!tracked_points.empty()) {
@@ -403,27 +354,17 @@ void LineDetectorNode::Impl::image_callback(
                  tracked_points.back().y);
   }
 
-  // Convert tracked points to line segments for compatibility
-  if (tracked_points.size() >= 2) {
-    // Add intermediate segments for better visualization
-    for (size_t i = 1; i < tracked_points.size(); i++) {
-      segments_out.push_back(
-          cv::Vec4i(tracked_points[i - 1].x, tracked_points[i - 1].y,
-                    tracked_points[i].x, tracked_points[i].y));
-    }
-  }
+  // Step 4: Publish lines data
+  publish_lines(tracked_points, roi_rect);
 
-  // Step 5: Publish lines data
-  publish_lines(segments_out, roi_rect);
-
-  // Step 6: Localization (if calibrated)
+  // Step 5: Localization (if calibrated)
   if (state_ == State::Localizing) {
-    perform_localization(segments_out, landmark_pos, found);
+    perform_localization(tracked_points, landmark_pos, found);
   }
 
-  // Step 7: Visualization
+  // Step 6: Visualization
   if (publish_image_ && image_pub_) {
-    publish_visualization(msg, original_img, black_mask, segments_out,
+    publish_visualization(msg, original_img, black_mask, tracked_points,
                           roi_rect);
   }
 
@@ -440,42 +381,15 @@ void LineDetectorNode::Impl::image_callback(
                 last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
   } else if (state_ == State::Calibrating) {
     RCLCPP_DEBUG(node_->get_logger(),
-                 "Calibrating: %zu lines detected in %.2f ms",
-                 segments_out.size(), ms);
+                 "Calibrating: %zu points tracked in %.2f ms",
+                 tracked_points.size(), ms);
   } else {
-    RCLCPP_INFO(node_->get_logger(), "Processed frame: %zu lines in %.2f ms",
-                segments_out.size(), ms);
+    RCLCPP_INFO(node_->get_logger(), "Processed frame: %zu points in %.2f ms",
+                tracked_points.size(), ms);
   }
 }
 
-cv::Mat LineDetectorNode::Impl::preprocess_image(
-    const sensor_msgs::msg::Image::ConstSharedPtr msg, cv::Mat& original_img,
-    cv::Mat& work_img, cv::Rect& roi_rect) {
-  cv_bridge::CvImagePtr cv_ptr;
-  try {
-    cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-  } catch (cv_bridge::Exception& e) {
-    RCLCPP_ERROR(node_->get_logger(), "cv_bridge exception: %s", e.what());
-    return cv::Mat();
-  }
-
-  original_img = cv_ptr->image;
-  roi_rect = valid_roi(original_img, roi_);
-  work_img = original_img(roi_rect).clone();
-
-  cv::Mat gray;
-  cv::cvtColor(work_img, gray, cv::COLOR_BGR2GRAY);
-
-  if (blur_ksize_ > 1 && blur_sigma_ > 0) {
-    cv::GaussianBlur(gray, gray, cv::Size(blur_ksize_, blur_ksize_),
-                     blur_sigma_);
-  }
-
-  return gray;
-}
-
-cv::Mat LineDetectorNode::Impl::extract_black_regions(const cv::Mat& img,
-                                                      const cv::Rect& /*roi*/) {
+cv::Mat LineDetectorNode::Impl::extract_black_regions(const cv::Mat& img) {
   cv::Mat black_mask;
 
   // Convert to HSV if needed
@@ -514,53 +428,56 @@ cv::Mat LineDetectorNode::Impl::extract_black_regions(const cv::Mat& img,
   return black_mask;
 }
 
-std::vector<cv::Point2d> LineDetectorNode::Impl::track_black_line(
-    const cv::Mat& black_mask, const cv::Rect& roi) {
+void LineDetectorNode::Impl::configure_line_tracker() {
   if (!line_tracker_) {
     RCLCPP_WARN(node_->get_logger(), "Line tracker not initialized");
-    return std::vector<cv::Point2d>();
+    return;
   }
 
-  // Configure tracker if needed (can be made dynamic via parameters)
+  // Configure tracker (can be made dynamic via parameters in the future)
   AdaptiveLineTracker::Config config;
   config.max_line_width = 80.0;    // Reduced: black line shouldn't be too wide
-  config.min_line_width = 20.0;    // Increased: filter out thin noise
+  config.min_line_width = 10.0;    // Increased: filter out thin noise
   config.max_lateral_jump = 20.0;  // Reduced: line shouldn't jump too much
   config.scan_step = 5;
   config.position_weight = 0.5;  // Increase weight for position continuity
   config.prediction_weight = 0.3;
   config.width_weight = 0.2;
   line_tracker_->set_config(config);
-
-  // Track the line
-  return line_tracker_->track_line(black_mask, roi);
 }
 
 void LineDetectorNode::Impl::publish_lines(
-    const std::vector<cv::Vec4i>& segments_out, const cv::Rect& roi_rect) {
+    const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect) {
   auto msg = std_msgs::msg::Float32MultiArray();
-  msg.layout.dim.resize(2);
-  msg.layout.dim[0].label = "lines";
-  msg.layout.dim[0].size = segments_out.size();
-  msg.layout.dim[0].stride = segments_out.size() * 4;
-  msg.layout.dim[1].label = "coords";
-  msg.layout.dim[1].size = 4;
-  msg.layout.dim[1].stride = 4;
 
-  for (const auto& line : segments_out) {
-    // Convert to original image coordinates
-    msg.data.push_back(static_cast<float>(line[0] + roi_rect.x));
-    msg.data.push_back(static_cast<float>(line[1] + roi_rect.y));
-    msg.data.push_back(static_cast<float>(line[2] + roi_rect.x));
-    msg.data.push_back(static_cast<float>(line[3] + roi_rect.y));
+  // Convert points to segments for backward compatibility
+  if (tracked_points.size() >= 2) {
+    size_t num_segments = tracked_points.size() - 1;
+    msg.layout.dim.resize(2);
+    msg.layout.dim[0].label = "lines";
+    msg.layout.dim[0].size = num_segments;
+    msg.layout.dim[0].stride = num_segments * 4;
+    msg.layout.dim[1].label = "coords";
+    msg.layout.dim[1].size = 4;
+    msg.layout.dim[1].stride = 4;
+
+    for (size_t i = 1; i < tracked_points.size(); i++) {
+      // Convert to original image coordinates
+      msg.data.push_back(
+          static_cast<float>(tracked_points[i - 1].x + roi_rect.x));
+      msg.data.push_back(
+          static_cast<float>(tracked_points[i - 1].y + roi_rect.y));
+      msg.data.push_back(static_cast<float>(tracked_points[i].x + roi_rect.x));
+      msg.data.push_back(static_cast<float>(tracked_points[i].y + roi_rect.y));
+    }
   }
 
   lines_pub_->publish(msg);
 }
 
 void LineDetectorNode::Impl::perform_localization(
-    const std::vector<cv::Vec4i>& segments_out, const cv::Point2d& landmark_pos,
-    bool found) {
+    const std::vector<cv::Point2d>& tracked_points,
+    const cv::Point2d& landmark_pos, bool found) {
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
     localization_valid_ = false;
     return;
@@ -587,13 +504,13 @@ void LineDetectorNode::Impl::perform_localization(
   const double robot_x = landmark_map_x_ - x_offset;
   const double robot_y = landmark_map_y_ - d;
 
-  // Estimate yaw from detected lines
+  // Estimate yaw from tracked points trajectory
   double yaw_rad = 0.0;
-  if (!segments_out.empty()) {
+  if (tracked_points.size() >= 2) {
     std::vector<double> angles;
-    for (const auto& seg : segments_out) {
-      double dx = seg[2] - seg[0];
-      double dy = seg[3] - seg[1];
+    for (size_t i = 1; i < tracked_points.size(); i++) {
+      double dx = tracked_points[i].x - tracked_points[i - 1].x;
+      double dy = tracked_points[i].y - tracked_points[i - 1].y;
       if (std::abs(dx) > 10) {  // Filter short segments
         angles.push_back(std::atan2(dy, dx));
       }
@@ -616,7 +533,7 @@ void LineDetectorNode::Impl::perform_localization(
 void LineDetectorNode::Impl::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
     const cv::Mat& original_img, const cv::Mat& edges,
-    const std::vector<cv::Vec4i>& segments_out, const cv::Rect& roi_rect) {
+    const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect) {
   cv::Mat output_img;
   if (show_edges_) {
     cv::cvtColor(edges, output_img, cv::COLOR_GRAY2BGR);
@@ -627,13 +544,16 @@ void LineDetectorNode::Impl::publish_visualization(
   // Draw ROI rectangle
   cv::rectangle(output_img, roi_rect, cv::Scalar(255, 255, 0), 1);
 
-  // Draw detected lines
-  const cv::Scalar line_color(draw_color_bgr_[0], draw_color_bgr_[1],
-                              draw_color_bgr_[2]);
-  for (const auto& line : segments_out) {
-    cv::Point pt1(line[0] + roi_rect.x, line[1] + roi_rect.y);
-    cv::Point pt2(line[2] + roi_rect.x, line[3] + roi_rect.y);
-    cv::line(output_img, pt1, pt2, line_color, draw_thickness_);
+  // Draw tracked line trajectory (fixed green color, thickness 2)
+  const cv::Scalar line_color(0, 255, 0);  // Green in BGR
+  if (tracked_points.size() >= 2) {
+    for (size_t i = 1; i < tracked_points.size(); i++) {
+      cv::Point pt1(tracked_points[i - 1].x + roi_rect.x,
+                    tracked_points[i - 1].y + roi_rect.y);
+      cv::Point pt2(tracked_points[i].x + roi_rect.x,
+                    tracked_points[i].y + roi_rect.y);
+      cv::line(output_img, pt1, pt2, line_color, 2);
+    }
   }
 
   // Draw calibration visualization
