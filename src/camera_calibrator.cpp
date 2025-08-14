@@ -115,9 +115,6 @@ class CameraCalibrator::Impl {
   int calib_hsv_v_min_;
   int calib_hsv_v_max_;
   int calib_min_area_;
-  int calib_min_major_px_;
-  double calib_max_major_ratio_;
-  double calib_fill_min_;
 };
 
 // CameraCalibrator public interface implementation
@@ -175,10 +172,6 @@ void CameraCalibrator::Impl::declare_parameters() {
   calib_hsv_v_min_ = node_->declare_parameter<int>("calib_hsv_v_min", 100);
   calib_hsv_v_max_ = node_->declare_parameter<int>("calib_hsv_v_max", 168);
   calib_min_area_ = node_->declare_parameter<int>("calib_min_area", 80);
-  calib_min_major_px_ = node_->declare_parameter<int>("calib_min_major_px", 8);
-  calib_max_major_ratio_ =
-      node_->declare_parameter<double>("calib_max_major_ratio", 0.65);
-  calib_fill_min_ = node_->declare_parameter<double>("calib_fill_min", 0.25);
 
   // Sanitize calibration parameters
   camera_height_meters_ = std::max(0.01, camera_height_meters_);
@@ -189,9 +182,6 @@ void CameraCalibrator::Impl::declare_parameters() {
   calib_hsv_v_max_ =
       std::max(calib_hsv_v_min_, std::min(255, calib_hsv_v_max_));
   calib_min_area_ = std::max(1, calib_min_area_);
-  calib_min_major_px_ = std::max(1, calib_min_major_px_);
-  calib_max_major_ratio_ = std::max(0.1, std::min(1.0, calib_max_major_ratio_));
-  calib_fill_min_ = std::max(0.0, std::min(1.0, calib_fill_min_));
 }
 
 bool CameraCalibrator::Impl::try_update_parameter(
@@ -225,15 +215,6 @@ bool CameraCalibrator::Impl::try_update_parameter(
     return true;
   } else if (name == "calib_min_area") {
     calib_min_area_ = std::max(1, static_cast<int>(param.as_int()));
-    return true;
-  } else if (name == "calib_min_major_px") {
-    calib_min_major_px_ = std::max(1, static_cast<int>(param.as_int()));
-    return true;
-  } else if (name == "calib_max_major_ratio") {
-    calib_max_major_ratio_ = std::max(0.1, std::min(1.0, param.as_double()));
-    return true;
-  } else if (name == "calib_fill_min") {
-    calib_fill_min_ = std::max(0.0, std::min(1.0, param.as_double()));
     return true;
   }
 
@@ -292,12 +273,9 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
     const cv::Mat& hsv_img, const cv::Mat& mask,
     cv::RotatedRect& best_ellipse) {
   const double max_major =
-      calib_max_major_ratio_ *
       static_cast<double>(std::min(bgr_img.cols, bgr_img.rows));
 
-  // Pre-calculate work center and v_target once
-  const cv::Point2f work_center(static_cast<float>(bgr_img.cols) / 2.0f,
-                                static_cast<float>(bgr_img.rows) / 2.0f);
+  // Pre-calculate v_target once
   const double v_target = 0.5 * (static_cast<double>(calib_hsv_v_min_) +
                                  static_cast<double>(calib_hsv_v_max_));
 
@@ -326,11 +304,10 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
     double major = width / 2.0;
     double minor = height / 2.0;
     if (major <= 0.0 || minor <= 0.0) continue;
-    if (major < static_cast<double>(calib_min_major_px_)) continue;
     if (major > max_major) continue;
 
     double ratio = minor / major;
-    if (ratio < 0.2 || ratio > 1.25) continue;
+    if (ratio < 0.2) continue;  // Too elongated, likely noise
 
     // Create ellipse mask and calculate HSV statistics
     cv::Mat ell_mask = cv::Mat::zeros(bgr_img.size(), CV_8UC1);
@@ -338,9 +315,6 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
     cv::Scalar mean_hsv = cv::mean(hsv_img, ell_mask);
     double mean_s = mean_hsv[1];
     double mean_v = mean_hsv[2];
-
-    // Early rejection based on V value
-    if (mean_v < static_cast<double>(calib_hsv_v_min_) + 10.0) continue;
 
     // Calculate fill ratio
     cv::Mat mask_inside;
@@ -351,19 +325,17 @@ bool CameraCalibrator::Impl::find_ellipse_from_contours(
             ? static_cast<double>(cv::countNonZero(mask_inside)) / ellipse_area
             : 0.0;
 
-    if (fill < calib_fill_min_) continue;
+    if (fill < 0.6) continue;  // Fixed threshold for fill ratio
 
-    // Calculate score (inlined from score_ellipse)
-    // Normalize angle to [0, 180)
-    while (angle_deg < 0.0) angle_deg += 180.0;
-    while (angle_deg >= 180.0) angle_deg -= 180.0;
+    // Calculate score
+    // Normalize angle to [-90, 90]
+    while (angle_deg > 90.0) angle_deg -= 180.0;
+    while (angle_deg <= -90.0) angle_deg += 180.0;
 
-    double d = cv::norm(e.center - work_center);
-    double angle_pen =
-        std::min(std::abs(angle_deg), std::abs(180.0 - angle_deg));
+    double angle_pen = std::abs(angle_deg);
 
     double score =
-        d + 0.05 * major + 0.2 * angle_pen +
+        0.05 * major + 0.2 * angle_pen +
         0.10 * std::max(0.0, mean_s - static_cast<double>(calib_hsv_s_max_)) +
         0.002 * std::abs(mean_v - v_target);
 
@@ -477,15 +449,16 @@ void CameraCalibrator::Impl::try_finalize_calibration() {
   const double u = (v_med - node_->cy_) / node_->fy_;
   const double D = landmark_distance_meters_;
   const double h = camera_height_meters_;
-  // tan(theta) = (D*u - h) / (D + h*u)
+  // φ = atan(h/D) - atan(u)
+  // tan(φ) = (D*u - h) / (D + h*u)
   const double denom = (D + h * u);
   if (std::abs(denom) < 1e-6) return;  // avoid singularities
 
   const double t = (D * u - h) / denom;
   const double theta = std::atan(t);
 
-  // Sanity clamp to [-45, 45] deg
-  const double max_rad = deg2rad(45.0);
+  // Sanity clamp to [-90, 90] deg
+  const double max_rad = deg2rad(90.0);
   const double pitch_rad = std::max(-max_rad, std::min(theta, max_rad));
 
   if (calib_timeout_sec_ == 0.0) {
@@ -507,6 +480,27 @@ void CameraCalibrator::Impl::draw_visualization_overlay(cv::Mat& img) const {
     cv::Rect roi = valid_roi(img, calib_roi_);
     cv::rectangle(img, roi, cv::Scalar(255, 0, 0),
                   1);  // Blue rectangle (thinner)
+
+    // Draw dashed crosshair lines at ROI center
+    // Calculate center of ROI
+    int center_x = roi.x + roi.width / 2;
+    int center_y = roi.y + roi.height / 2;
+
+    // Draw horizontal dashed line (within ROI)
+    const int dash_length = 5;
+    const int gap_length = 5;
+    for (int x = roi.x; x < roi.x + roi.width; x += dash_length + gap_length) {
+      int x_end = std::min(x + dash_length, roi.x + roi.width);
+      cv::line(img, cv::Point(x, center_y), cv::Point(x_end, center_y),
+               cv::Scalar(128, 128, 128), 1);  // Gray dashed line
+    }
+
+    // Draw vertical dashed line (within ROI)
+    for (int y = roi.y; y < roi.y + roi.height; y += dash_length + gap_length) {
+      int y_end = std::min(y + dash_length, roi.y + roi.height);
+      cv::line(img, cv::Point(center_x, y), cv::Point(center_x, y_end),
+               cv::Scalar(128, 128, 128), 1);  // Gray dashed line
+    }
   }
 
   // Draw detected ellipse and landmark info if available
