@@ -4,6 +4,8 @@ Line Detector Parameter Tuning GUI
 
 A GUI tool for real-time parameter tuning of the etrobo_line_detector node.
 Displays the image_with_lines topic and allows interactive parameter adjustment.
+
+Updated to work with AdaptiveLineTracker - removed edge detection parameters.
 """
 
 import tkinter as tk
@@ -150,9 +152,9 @@ class LineDetectorParameterGUI:
         # Parameter definitions organized by category
         self.parameter_definitions = {
             "I/O Settings": {
-                "image_topic": {"type": "string", "default": "image"},
-                "publish_image_with_lines": {"type": "bool", "default": False},
-                "show_edges": {"type": "bool", "default": False}
+                "image_topic": {"type": "string", "default": "camera/image_raw"},
+                "publish_image_with_lines": {"type": "bool", "default": True},
+                "show_black_mask": {"type": "bool", "default": False}
             },
             "Pre-processing": {
                 "blur_ksize": {"type": "int", "default": 5, "min": 1, "max": 21, "step": 2},
@@ -163,33 +165,18 @@ class LineDetectorParameterGUI:
                 "roi_w": {"type": "int", "default": -1, "min": -1, "max": 1920},
                 "roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080}
             },
-            "Canny Edge": {
-                "canny_low": {"type": "int", "default": 40, "min": 0, "max": 255},
-                "canny_high": {"type": "int", "default": 120, "min": 0, "max": 255},
-                "canny_aperture": {"type": "choice", "default": 3, "choices": [3, 5, 7]},
-                "canny_L2gradient": {"type": "bool", "default": False}
-            },
-            "HSV Mask": {
+            "Black Line Detection": {
                 "use_hsv_mask": {"type": "bool", "default": True},
-                "hsv_lower_h": {"type": "int", "default": 0, "min": 0, "max": 180},
-                "hsv_lower_s": {"type": "int", "default": 0, "min": 0, "max": 255},
-                "hsv_lower_v": {"type": "int", "default": 0, "min": 0, "max": 255},
-                "hsv_upper_h": {"type": "int", "default": 180, "min": 0, "max": 180},
-                "hsv_upper_s": {"type": "int", "default": 40, "min": 0, "max": 255},
-                "hsv_upper_v": {"type": "int", "default": 148, "min": 0, "max": 255},
+                "hsv_upper_v": {"type": "int", "default": 80, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
-                "hsv_dilate_iter": {"type": "int", "default": 2, "min": 0, "max": 10}
+                "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
             },
-            "Hough Transform": {
-                "hough_type": {"type": "choice", "default": "probabilistic",
-                               "choices": ["probabilistic", "standard"]},
-                "rho": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
-                "theta_deg": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
-                "threshold": {"type": "int", "default": 50, "min": 1, "max": 200},
-                "min_line_length": {"type": "double", "default": 30.0, "min": 1.0, "max": 200.0},
-                "max_line_gap": {"type": "double", "default": 10.0, "min": 1.0, "max": 100.0},
-                "min_theta_deg": {"type": "double", "default": 0.0, "min": 0.0, "max": 180.0},
-                "max_theta_deg": {"type": "double", "default": 180.0, "min": 0.0, "max": 180.0}
+            "Adaptive Line Tracker": {
+                "tracker_max_line_width": {"type": "double", "default": 80.0, "min": 10.0, "max": 200.0},
+                "tracker_min_line_width": {"type": "double", "default": 20.0, "min": 5.0, "max": 100.0},
+                "tracker_max_lateral_jump": {"type": "double", "default": 20.0, "min": 5.0, "max": 100.0},
+                "tracker_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
+                "tracker_smooth_window": {"type": "int", "default": 3, "min": 1, "max": 11, "step": 2}
             },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
