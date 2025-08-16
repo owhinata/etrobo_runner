@@ -70,8 +70,7 @@ class LineDetectorNode::Impl {
  private:
   cv::Mat extract_black_regions(const cv::Mat& img);
   void configure_line_tracker();  // Helper to configure tracker parameters
-  void publish_lines(const std::vector<cv::Point2d>& tracked_points,
-                     const cv::Rect& roi_rect);
+  void publish_lines(const std::vector<cv::Point2d>& tracked_points);
   void perform_localization(const std::vector<cv::Point2d>& tracked_points,
                             const cv::Point2d& landmark_pos, bool found);
   void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
@@ -343,7 +342,14 @@ void LineDetectorNode::Impl::image_callback(
   // Configure and track the black line (gray disk is already excluded by HSV
   // thresholding)
   configure_line_tracker();
-  auto tracked_points = line_tracker_->track_line(black_mask, roi_rect);
+  auto tracked_points_rel = line_tracker_->track_line(black_mask);
+
+  // Convert from relative (mask) coordinates to absolute (image) coordinates
+  std::vector<cv::Point2d> tracked_points;
+  tracked_points.reserve(tracked_points_rel.size());
+  for (const auto& pt : tracked_points_rel) {
+    tracked_points.emplace_back(pt.x + roi_rect.x, pt.y + roi_rect.y);
+  }
 
   // Debug: Log tracked points
   if (!tracked_points.empty()) {
@@ -355,7 +361,7 @@ void LineDetectorNode::Impl::image_callback(
   }
 
   // Step 4: Publish lines data
-  publish_lines(tracked_points, roi_rect);
+  publish_lines(tracked_points);
 
   // Step 5: Localization (if calibrated)
   if (state_ == State::Localizing) {
@@ -407,6 +413,7 @@ cv::Mat LineDetectorNode::Impl::extract_black_regions(const cv::Mat& img) {
 
   // Extract black regions (low V value)
   // Black line typically has V < 50-80 depending on lighting
+
   cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(180, 255, hsv_upper_v_),
               black_mask);
 
@@ -447,7 +454,7 @@ void LineDetectorNode::Impl::configure_line_tracker() {
 }
 
 void LineDetectorNode::Impl::publish_lines(
-    const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect) {
+    const std::vector<cv::Point2d>& tracked_points) {
   auto msg = std_msgs::msg::Float32MultiArray();
 
   // Convert points to segments for backward compatibility
@@ -462,13 +469,11 @@ void LineDetectorNode::Impl::publish_lines(
     msg.layout.dim[1].stride = 4;
 
     for (size_t i = 1; i < tracked_points.size(); i++) {
-      // Convert to original image coordinates
-      msg.data.push_back(
-          static_cast<float>(tracked_points[i - 1].x + roi_rect.x));
-      msg.data.push_back(
-          static_cast<float>(tracked_points[i - 1].y + roi_rect.y));
-      msg.data.push_back(static_cast<float>(tracked_points[i].x + roi_rect.x));
-      msg.data.push_back(static_cast<float>(tracked_points[i].y + roi_rect.y));
+      // Points are already in absolute coordinates
+      msg.data.push_back(static_cast<float>(tracked_points[i - 1].x));
+      msg.data.push_back(static_cast<float>(tracked_points[i - 1].y));
+      msg.data.push_back(static_cast<float>(tracked_points[i].x));
+      msg.data.push_back(static_cast<float>(tracked_points[i].y));
     }
   }
 
@@ -544,16 +549,12 @@ void LineDetectorNode::Impl::publish_visualization(
   // Draw ROI rectangle
   cv::rectangle(output_img, roi_rect, cv::Scalar(255, 255, 0), 1);
 
-  // Draw tracked line trajectory (fixed green color, thickness 2)
-  const cv::Scalar line_color(0, 255, 0);  // Green in BGR
-  if (tracked_points.size() >= 2) {
-    for (size_t i = 1; i < tracked_points.size(); i++) {
-      cv::Point pt1(tracked_points[i - 1].x + roi_rect.x,
-                    tracked_points[i - 1].y + roi_rect.y);
-      cv::Point pt2(tracked_points[i].x + roi_rect.x,
-                    tracked_points[i].y + roi_rect.y);
-      cv::line(output_img, pt1, pt2, line_color, 2);
-    }
+  // Draw tracked points (fixed green color, radius 3)
+  const cv::Scalar point_color(0, 255, 0);  // Green in BGR
+  for (const auto& pt : tracked_points) {
+    // Points are already in absolute coordinates
+    cv::Point center(static_cast<int>(pt.x), static_cast<int>(pt.y));
+    cv::circle(output_img, center, 3, point_color, -1);  // Filled circle
   }
 
   // Draw calibration visualization

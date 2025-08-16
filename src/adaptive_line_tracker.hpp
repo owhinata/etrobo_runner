@@ -10,9 +10,8 @@ class AdaptiveLineTracker {
   AdaptiveLineTracker();
   ~AdaptiveLineTracker();
 
-  // Main tracking function
-  std::vector<cv::Point2d> track_line(const cv::Mat& black_mask,
-                                      const cv::Rect& roi);
+  // Main tracking function (returns points in mask's coordinate system)
+  std::vector<cv::Point2d> track_line(const cv::Mat& black_mask);
 
   // Reset the tracker
   void reset();
