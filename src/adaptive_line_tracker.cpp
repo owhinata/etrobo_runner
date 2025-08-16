@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <opencv2/opencv.hpp>
 
 // =======================
@@ -34,9 +35,14 @@ class AdaptiveLineTracker::Impl {
   // Find black segments in a horizontal scan line
   std::vector<Segment> find_black_segments(const cv::Mat& mask, int y);
 
-  // Check if two segments are vertically connected
-  bool are_segments_connected(const cv::Mat& mask, const Segment& seg1, int y1,
-                              const Segment& seg2, int y2);
+  // Check which contour a segment belongs to
+  int find_segment_contour(const std::vector<std::vector<cv::Point>>& contours,
+                           const Segment& seg, int y);
+
+  // Check if two segments belong to the same contour
+  bool are_segments_in_same_contour(
+      const std::vector<std::vector<cv::Point>>& contours, const Segment& seg1,
+      int y1, const Segment& seg2, int y2);
 
   // Member variables
   std::vector<cv::Point2d> tracked_points_;
@@ -108,18 +114,29 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     }
   }
 
-  // Step 2: Initialize tracking structures
-  struct TrackedLine {
-    std::vector<cv::Point2d> points;  // Detected points for this line
-    Segment last_segment;             // Last detected segment
-    int last_y;                       // Y coordinate of last detection
-    int consecutive_missing;          // Count of consecutive missing detections
-  };
+  // Step 2: Find contours in the mask for connectivity checking
+  std::vector<std::vector<cv::Point>> contours;
+  cv::Mat mask_copy = black_mask.clone();  // findContours modifies the input
+  cv::findContours(mask_copy, contours, cv::RETR_EXTERNAL,
+                   cv::CHAIN_APPROX_NONE);
 
-  std::vector<TrackedLine> tracked_lines;
-  std::vector<cv::Point2d> candidate_points;
+  if (debug_this_frame) {
+    std::cout << "Found " << contours.size() << " contours" << std::endl;
+    // Show contour details
+    for (size_t i = 0; i < contours.size() && i < 5; i++) {
+      cv::Rect bbox = cv::boundingRect(contours[i]);
+      std::cout << "  Contour " << i << ": " << contours[i].size() << " points"
+                << ", bbox: [" << bbox.x << "," << bbox.y << "," << bbox.width
+                << "x" << bbox.height << "]"
+                << ", area: " << cv::contourArea(contours[i]) << std::endl;
+    }
+  }
 
-  // Step 3: Scan from bottom to top
+  // Step 3: Initialize tracking structures - group by contour
+  // Map from contour index to collected points
+  std::map<int, std::vector<cv::Point2d>> contour_points;
+
+  // Step 4: Scan from bottom to top and collect points by contour
   int total_scans = 0;
   int successful_detections = 0;
   const int scan_step = config_.scan_step;
@@ -129,74 +146,28 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     total_scans++;
 
     if (segments.empty()) {
-      // Update consecutive missing count for all tracked lines
-      for (auto& line : tracked_lines) {
-        line.consecutive_missing++;
-      }
       continue;
     }
 
     successful_detections++;
 
-    // Match segments to existing tracked lines or create new ones
-    std::vector<bool> segment_matched(segments.size(), false);
-
-    // Try to match each tracked line with a segment
-    for (auto& line : tracked_lines) {
-      if (line.consecutive_missing >
-          10) {    // Increased tolerance for missing segments
-        continue;  // Skip lines that have been missing too long
-      }
-
-      int best_match_idx = -1;
-      double best_overlap = 0;
-
-      // Find best matching segment based on vertical connectivity
+    // Debug: Show segment to contour mapping
+    if (debug_this_frame && (y > 450 || y % 50 == 3)) {
+      std::cout << "[SEGMENT-CONTOUR] y=" << y << ": ";
       for (size_t i = 0; i < segments.size(); i++) {
-        if (segment_matched[i]) continue;
-
-        // Check if segments are connected through black pixels
-        if (are_segments_connected(black_mask, line.last_segment, line.last_y,
-                                   segments[i], y)) {
-          // Calculate overlap ratio
-          double overlap_start =
-              std::max(line.last_segment.start_x, segments[i].start_x);
-          double overlap_end =
-              std::min(line.last_segment.end_x, segments[i].end_x);
-          double overlap = std::max(0.0, overlap_end - overlap_start);
-          double overlap_ratio = overlap / std::min(line.last_segment.width(),
-                                                    segments[i].width());
-
-          if (overlap_ratio > best_overlap) {
-            best_overlap = overlap_ratio;
-            best_match_idx = i;
-          }
-        }
+        int contour_idx = find_segment_contour(contours, segments[i], y);
+        std::cout << "seg" << i << "[" << segments[i].start_x << "-"
+                  << segments[i].end_x << "]->C" << contour_idx << " ";
       }
-
-      if (best_match_idx >= 0) {
-        // Found a match - continue this line
-        segment_matched[best_match_idx] = true;
-        line.points.push_back(
-            cv::Point2d(segments[best_match_idx].center(), y));
-        line.last_segment = segments[best_match_idx];
-        line.last_y = y;
-        line.consecutive_missing = 0;
-      } else {
-        // No match found
-        line.consecutive_missing++;
-      }
+      std::cout << std::endl;
     }
 
-    // Create new tracked lines for unmatched segments
-    for (size_t i = 0; i < segments.size(); i++) {
-      if (!segment_matched[i]) {
-        TrackedLine new_line;
-        new_line.points.push_back(cv::Point2d(segments[i].center(), y));
-        new_line.last_segment = segments[i];
-        new_line.last_y = y;
-        new_line.consecutive_missing = 0;
-        tracked_lines.push_back(new_line);
+    // Group segments by contour
+    for (const auto& seg : segments) {
+      int contour_idx = find_segment_contour(contours, seg, y);
+      if (contour_idx >= 0) {
+        // Add point to the corresponding contour group
+        contour_points[contour_idx].push_back(cv::Point2d(seg.center(), y));
       }
     }
 
@@ -208,57 +179,61 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
         std::cout << " | seg" << i << "[" << segments[i].start_x << "-"
                   << segments[i].end_x << "]w=" << segments[i].width();
       }
-      std::cout << " | " << tracked_lines.size() << " tracked lines"
-                << std::endl;
+      std::cout << std::endl;
     }
   }
 
-  // Step 4: Filter and select significant lines
-  if (!tracked_lines.empty()) {
-    // Filter out short lines that are likely noise
-    const size_t MIN_POINTS_FOR_LINE = 8;  // ~40 pixels at scan_step=5
-    std::vector<size_t> significant_lines;
+  // Step 5: Filter contour groups and collect valid points
+  std::vector<cv::Point2d> candidate_points;
+  const size_t MIN_POINTS_PER_CONTOUR =
+      5;  // Minimum points to consider a contour valid
 
-    for (size_t i = 0; i < tracked_lines.size(); i++) {
-      if (tracked_lines[i].points.size() >= MIN_POINTS_FOR_LINE) {
-        significant_lines.push_back(i);
+  if (debug_this_frame) {
+    std::cout << "[TRACK DEBUG] Processing " << contour_points.size()
+              << " contour groups:" << std::endl;
+  }
+
+  for (const auto& [contour_idx, points] : contour_points) {
+    if (debug_this_frame) {
+      std::cout << "  Contour " << contour_idx << ": " << points.size()
+                << " points";
+      if (!points.empty()) {
+        std::cout << ", y-range: [" << points.back().y << " - "
+                  << points.front().y << "]";
       }
     }
 
-    if (!significant_lines.empty()) {
-      // Combine all significant lines into candidate_points
-      // Sort them by y-coordinate to maintain bottom-up order
-      for (size_t idx : significant_lines) {
-        for (const auto& pt : tracked_lines[idx].points) {
-          candidate_points.push_back(pt);
-        }
+    if (points.size() >= MIN_POINTS_PER_CONTOUR) {
+      // Add all points from valid contours
+      for (const auto& pt : points) {
+        candidate_points.push_back(pt);
       }
-
-      // Sort by y coordinate (descending, since bottom is higher y value)
-      std::sort(candidate_points.begin(), candidate_points.end(),
-                [](const cv::Point2d& a, const cv::Point2d& b) {
-                  return a.y > b.y;  // Bottom to top
-                });
-
       if (debug_this_frame) {
-        std::cout << "[TRACK DEBUG] Found " << significant_lines.size()
-                  << " significant lines (>= 5 points)" << std::endl;
-        for (size_t idx : significant_lines) {
-          std::cout << "  Line " << idx << ": "
-                    << tracked_lines[idx].points.size() << " points";
-          if (!tracked_lines[idx].points.empty()) {
-            std::cout << ", y-range: [" << tracked_lines[idx].points.back().y
-                      << " - " << tracked_lines[idx].points.front().y << "]";
-          }
-          std::cout << std::endl;
-        }
-        std::cout << "  Combined into " << candidate_points.size()
-                  << " total points" << std::endl;
+        std::cout << " -> VALID (added " << points.size() << " points)";
       }
+    } else {
+      if (debug_this_frame) {
+        std::cout << " -> SKIPPED (too few points)";
+      }
+    }
+
+    if (debug_this_frame) {
+      std::cout << std::endl;
     }
   }
 
-  // Step 5: Report tracking statistics
+  // Sort by y coordinate (descending, since bottom is higher y value)
+  std::sort(candidate_points.begin(), candidate_points.end(),
+            [](const cv::Point2d& a, const cv::Point2d& b) {
+              return a.y > b.y;  // Bottom to top
+            });
+
+  if (debug_this_frame) {
+    std::cout << "  Combined into " << candidate_points.size()
+              << " total points" << std::endl;
+  }
+
+  // Step 6: Report tracking statistics
   if (debug_this_frame) {
     std::cout << "[TRACK DEBUG] Scanning complete:" << std::endl;
     std::cout << "  Total scans: " << total_scans << std::endl;
@@ -274,7 +249,7 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     }
   }
 
-  // Step 6: Return results (without smoothing)
+  // Step 7: Return results (without smoothing)
   // Note: Smoothing is disabled as it causes issues with branches
   // where points from different branches get averaged together
   tracked_points_ = candidate_points;
@@ -305,7 +280,7 @@ AdaptiveLineTracker::Impl::find_black_segments(const cv::Mat& mask, int y) {
       in_black = true;
     } else if (!is_black_line && in_black) {
       double width = x - start_x;
-      if (width >= config_.min_line_width && width <= config_.max_line_width) {
+      if (width >= config_.min_line_width) {  // Only check minimum width
         // Store in relative coordinates
         segments.push_back({start_x, x});
       }
@@ -317,7 +292,7 @@ AdaptiveLineTracker::Impl::find_black_segments(const cv::Mat& mask, int y) {
   if (in_black) {
     int end_x = mask.cols;
     double width = end_x - start_x;
-    if (width >= config_.min_line_width && width <= config_.max_line_width) {
+    if (width >= config_.min_line_width) {  // Only check minimum width
       // Store in relative coordinates
       segments.push_back({start_x, end_x});
     }
@@ -326,106 +301,77 @@ AdaptiveLineTracker::Impl::find_black_segments(const cv::Mat& mask, int y) {
   return segments;
 }
 
-bool AdaptiveLineTracker::Impl::are_segments_connected(const cv::Mat& mask,
-                                                       const Segment& seg1,
-                                                       int y1,
-                                                       const Segment& seg2,
-                                                       int y2) {
-  // Check connectivity by analyzing the black region shape around seg1
-  // and checking if seg2 falls within the expected continuation
+int AdaptiveLineTracker::Impl::find_segment_contour(
+    const std::vector<std::vector<cv::Point>>& contours, const Segment& seg,
+    int y) {
+  // Check center point of segment
+  cv::Point test_point(seg.center(), y);
 
-  if (y1 == y2) {
-    return false;  // Same scan line - should not happen
+  // Debug: Show what we're testing (occasionally)
+  static int call_count = 0;
+  bool debug_this_call = (call_count++ % 50 == 0);
+
+  if (debug_this_call) {
+    std::cout << "[FIND_CONTOUR] Testing segment [" << seg.start_x << "-"
+              << seg.end_x << "] at y=" << y << ", center=" << seg.center()
+              << std::endl;
   }
 
-  // Ensure y1 is below y2 (y1 > y2 since we scan bottom-up)
-  if (y1 < y2) {
-    return are_segments_connected(mask, seg2, y2, seg1, y1);
-  }
-
-  // Analyze the black region shape around seg1 to predict where it continues
-  // Start from seg1 and trace the black region upward
-
-  // Define the region of interest around seg1
-  int margin = 5;  // Pixels to check on each side
-  int x_start = std::max(0, seg1.start_x - margin);
-  int x_end = std::min(mask.cols - 1, seg1.end_x + margin);
-
-  // Trace the black region from y1 towards y2
-  std::vector<std::pair<int, int>>
-      traced_boundaries;  // (left_x, right_x) for each y
-
-  for (int y = y1; y >= y2 && y >= 0; y--) {
-    int left_boundary = -1;
-    int right_boundary = -1;
-
-    // Find the leftmost and rightmost black pixels in this row
-    // Start search from previous boundaries if available
-    if (!traced_boundaries.empty()) {
-      auto& prev = traced_boundaries.back();
-      // Search window based on previous boundaries with some tolerance
-      int search_start = std::max(0, prev.first - 10);
-      int search_end = std::min(mask.cols - 1, prev.second + 10);
-
-      // Find left boundary
-      for (int x = search_start; x <= search_end; x++) {
-        if (mask.at<uchar>(y, x) > 128) {  // Black pixel
-          left_boundary = x;
-          break;
-        }
-      }
-
-      // Find right boundary
-      if (left_boundary >= 0) {
-        for (int x = search_end; x >= left_boundary; x--) {
-          if (mask.at<uchar>(y, x) > 128) {  // Black line pixel (white in mask)
-            right_boundary = x;
-            break;
-          }
-        }
-      }
-    } else {
-      // First iteration - search in the original segment range
-      for (int x = x_start; x <= x_end; x++) {
-        if (mask.at<uchar>(y, x) > 128) {
-          if (left_boundary < 0) left_boundary = x;
-          right_boundary = x;
-        }
-      }
+  // Find which contour contains this point
+  for (size_t i = 0; i < contours.size(); i++) {
+    double result = cv::pointPolygonTest(contours[i], test_point, false);
+    if (debug_this_call && i < 3) {  // Show first 3 contours
+      std::cout << "  Contour " << i << ": pointPolygonTest = " << result
+                << std::endl;
     }
-
-    // Check if we lost the line
-    if (left_boundary < 0 || right_boundary < 0) {
-      // No black pixels found - line discontinued
-      break;
-    }
-
-    traced_boundaries.push_back({left_boundary, right_boundary});
-
-    // If we reached y2, check if seg2 overlaps with the traced region
-    if (y == y2) {
-      // Check if seg2 overlaps with the traced boundary at y2
-      int overlap_start = std::max(seg2.start_x, left_boundary);
-      int overlap_end = std::min(seg2.end_x, right_boundary);
-
-      if (overlap_start <= overlap_end) {
-        // Calculate overlap ratio
-        double overlap = overlap_end - overlap_start + 1;
-        double seg2_width = seg2.width();
-        double traced_width = right_boundary - left_boundary + 1;
-        double min_width = std::min(seg2_width, traced_width);
-
-        // Consider connected if significant overlap (>50% of smaller segment)
-        return (overlap / min_width) > 0.5;
+    if (result >= 0) {
+      if (debug_this_call) {
+        std::cout << "  -> Matched contour " << i << " (center test)"
+                  << std::endl;
       }
-
-      // Check if seg2 is very close to the traced boundary
-      int gap = std::min(std::abs(seg2.end_x - left_boundary),
-                         std::abs(right_boundary - seg2.start_x));
-      return gap <= 5;  // Allow small gaps
+      return i;
     }
   }
 
-  // If we couldn't trace all the way to y2, segments are not connected
-  return false;
+  // Also check endpoints if center didn't match
+  cv::Point start_point(seg.start_x, y);
+  cv::Point end_point(seg.end_x, y);
+
+  for (size_t i = 0; i < contours.size(); i++) {
+    if (cv::pointPolygonTest(contours[i], start_point, false) >= 0 ||
+        cv::pointPolygonTest(contours[i], end_point, false) >= 0) {
+      if (debug_this_call) {
+        std::cout << "  -> Matched contour " << i << " (endpoint test)"
+                  << std::endl;
+      }
+      return i;
+    }
+  }
+
+  if (debug_this_call) {
+    std::cout << "  -> No contour found!" << std::endl;
+  }
+
+  return -1;  // No contour found
+}
+
+bool AdaptiveLineTracker::Impl::are_segments_in_same_contour(
+    const std::vector<std::vector<cv::Point>>& contours, const Segment& seg1,
+    int y1, const Segment& seg2, int y2) {
+  int contour1 = find_segment_contour(contours, seg1, y1);
+  int contour2 = find_segment_contour(contours, seg2, y2);
+
+  // Debug output for troubleshooting
+  static int debug_count = 0;
+  if (debug_count++ % 20 == 0) {  // Every 20 calls
+    std::cout << "[CONTOUR MATCH] seg1[" << seg1.start_x << "-" << seg1.end_x
+              << "]@y=" << y1 << " -> contour " << contour1 << ", seg2["
+              << seg2.start_x << "-" << seg2.end_x << "]@y=" << y2
+              << " -> contour " << contour2 << " => "
+              << (contour1 >= 0 && contour1 == contour2 ? "MATCH" : "NO MATCH")
+              << std::endl;
+  }
+
+  // Both segments must belong to the same valid contour
+  return (contour1 >= 0 && contour1 == contour2);
 }
