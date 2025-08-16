@@ -68,13 +68,16 @@ class LineDetectorNode::Impl {
  private:
   cv::Mat extract_black_regions(const cv::Mat& img);
   void configure_line_tracker();  // Helper to configure tracker parameters
-  void publish_lines(const std::vector<cv::Point2d>& tracked_points);
-  void perform_localization(const std::vector<cv::Point2d>& tracked_points,
-                            const cv::Point2d& landmark_pos, bool found);
+  void publish_lines(
+      const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines);
+  void perform_localization(
+      const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
+      const cv::Point2d& landmark_pos, bool found);
   void publish_visualization(
       const sensor_msgs::msg::Image::ConstSharedPtr msg,
       const cv::Mat& original_img, const cv::Mat& edges,
-      const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect,
+      const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
+      const cv::Rect& roi_rect,
       const std::vector<std::vector<cv::Point>>& contours);
 
   // Node reference
@@ -344,29 +347,42 @@ void LineDetectorNode::Impl::image_callback(
 
   // Configure and track the black line (gray disk is already excluded by HSV
   // thresholding)
+  // Calculate current processing time to pass to tracker
+  const auto t_current = std::chrono::steady_clock::now();
+  const double current_ms =
+      std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+          t_current - t0)
+          .count();
+
   configure_line_tracker();
-  auto tracked_points_rel = line_tracker_->track_line(black_mask);
+  auto tracked_lines_rel = line_tracker_->track_line(black_mask, current_ms);
 
   // Convert from relative (mask) coordinates to absolute (image) coordinates
-  std::vector<cv::Point2d> tracked_points;
-  tracked_points.reserve(tracked_points_rel.size());
-  for (const auto& pt : tracked_points_rel) {
-    tracked_points.emplace_back(pt.x + roi_rect.x, pt.y + roi_rect.y);
+  std::vector<AdaptiveLineTracker::TrackedLine> tracked_lines;
+  for (const auto& line_rel : tracked_lines_rel) {
+    AdaptiveLineTracker::TrackedLine line_abs;
+    line_abs.contour_id = line_rel.contour_id;
+    line_abs.area = line_rel.area;
+    line_abs.points.reserve(line_rel.points.size());
+    for (const auto& pt : line_rel.points) {
+      line_abs.points.emplace_back(pt.x + roi_rect.x, pt.y + roi_rect.y);
+    }
+    tracked_lines.push_back(line_abs);
   }
 
   // Frame counter for periodic logging (handled in tracker)
 
   // Step 4: Publish lines data
-  publish_lines(tracked_points);
+  publish_lines(tracked_lines);
 
   // Step 5: Localization (if calibrated)
   if (state_ == State::Localizing) {
-    perform_localization(tracked_points, landmark_pos, found);
+    perform_localization(tracked_lines, landmark_pos, found);
   }
 
   // Step 6: Visualization
   if (publish_image_ && image_pub_) {
-    publish_visualization(msg, original_img, black_mask, tracked_points,
+    publish_visualization(msg, original_img, black_mask, tracked_lines,
                           roi_rect, contours);
   }
 
@@ -382,12 +398,14 @@ void LineDetectorNode::Impl::image_callback(
                 "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
                 last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
   } else if (state_ == State::Calibrating) {
+    // Count total points for logging
+    size_t total_points = 0;
+    for (const auto& line : tracked_lines) {
+      total_points += line.points.size();
+    }
     RCLCPP_DEBUG(node_->get_logger(),
-                 "Calibrating: %zu points tracked in %.2f ms",
-                 tracked_points.size(), ms);
-  } else {
-    RCLCPP_INFO(node_->get_logger(), "Processed frame: %zu points in %.2f ms",
-                tracked_points.size(), ms);
+                 "Calibrating: %zu points tracked in %.2f ms", total_points,
+                 ms);
   }
 }
 
@@ -451,12 +469,20 @@ void LineDetectorNode::Impl::configure_line_tracker() {
 }
 
 void LineDetectorNode::Impl::publish_lines(
-    const std::vector<cv::Point2d>& tracked_points) {
+    const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines) {
   auto msg = std_msgs::msg::Float32MultiArray();
 
+  // Collect all points from all lines for backward compatibility
+  std::vector<cv::Point2d> all_points;
+  for (const auto& line : tracked_lines) {
+    for (const auto& pt : line.points) {
+      all_points.push_back(pt);
+    }
+  }
+
   // Convert points to segments for backward compatibility
-  if (tracked_points.size() >= 2) {
-    size_t num_segments = tracked_points.size() - 1;
+  if (all_points.size() >= 2) {
+    size_t num_segments = all_points.size() - 1;
     msg.layout.dim.resize(2);
     msg.layout.dim[0].label = "lines";
     msg.layout.dim[0].size = num_segments;
@@ -465,12 +491,12 @@ void LineDetectorNode::Impl::publish_lines(
     msg.layout.dim[1].size = 4;
     msg.layout.dim[1].stride = 4;
 
-    for (size_t i = 1; i < tracked_points.size(); i++) {
+    for (size_t i = 1; i < all_points.size(); i++) {
       // Points are already in absolute coordinates
-      msg.data.push_back(static_cast<float>(tracked_points[i - 1].x));
-      msg.data.push_back(static_cast<float>(tracked_points[i - 1].y));
-      msg.data.push_back(static_cast<float>(tracked_points[i].x));
-      msg.data.push_back(static_cast<float>(tracked_points[i].y));
+      msg.data.push_back(static_cast<float>(all_points[i - 1].x));
+      msg.data.push_back(static_cast<float>(all_points[i - 1].y));
+      msg.data.push_back(static_cast<float>(all_points[i].x));
+      msg.data.push_back(static_cast<float>(all_points[i].y));
     }
   }
 
@@ -478,7 +504,7 @@ void LineDetectorNode::Impl::publish_lines(
 }
 
 void LineDetectorNode::Impl::perform_localization(
-    const std::vector<cv::Point2d>& tracked_points,
+    const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
     const cv::Point2d& landmark_pos, bool found) {
   if (!found || !has_cam_info_ || std::isnan(estimated_pitch_rad_)) {
     localization_valid_ = false;
@@ -507,12 +533,20 @@ void LineDetectorNode::Impl::perform_localization(
   const double robot_y = landmark_map_y_ - d;
 
   // Estimate yaw from tracked points trajectory
+  // Collect all points from all lines
+  std::vector<cv::Point2d> all_points;
+  for (const auto& line : tracked_lines) {
+    for (const auto& pt : line.points) {
+      all_points.push_back(pt);
+    }
+  }
+
   double yaw_rad = 0.0;
-  if (tracked_points.size() >= 2) {
+  if (all_points.size() >= 2) {
     std::vector<double> angles;
-    for (size_t i = 1; i < tracked_points.size(); i++) {
-      double dx = tracked_points[i].x - tracked_points[i - 1].x;
-      double dy = tracked_points[i].y - tracked_points[i - 1].y;
+    for (size_t i = 1; i < all_points.size(); i++) {
+      double dx = all_points[i].x - all_points[i - 1].x;
+      double dy = all_points[i].y - all_points[i - 1].y;
       if (std::abs(dx) > 10) {  // Filter short segments
         angles.push_back(std::atan2(dy, dx));
       }
@@ -535,7 +569,8 @@ void LineDetectorNode::Impl::perform_localization(
 void LineDetectorNode::Impl::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
     const cv::Mat& original_img, const cv::Mat& edges,
-    const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect,
+    const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
+    const cv::Rect& roi_rect,
     const std::vector<std::vector<cv::Point>>& contours) {
   cv::Mat output_img;
   if (show_edges_) {
@@ -597,12 +632,38 @@ void LineDetectorNode::Impl::publish_visualization(
     }
   }
 
-  // Draw tracked points (fixed green color, radius 3)
-  const cv::Scalar point_color(0, 255, 0);  // Green in BGR
-  for (const auto& pt : tracked_points) {
-    // Points are already in absolute coordinates
-    cv::Point center(static_cast<int>(pt.x), static_cast<int>(pt.y));
-    cv::circle(output_img, center, 3, point_color, -1);  // Filled circle
+  // Draw tracked points with different colors for different contours
+  for (size_t line_idx = 0; line_idx < tracked_lines.size(); line_idx++) {
+    const auto& line = tracked_lines[line_idx];
+
+    // Use different colors for different contours
+    cv::Scalar point_color;
+    switch (line.contour_id % 6) {
+      case 0:
+        point_color = cv::Scalar(0, 255, 0);  // Green
+        break;
+      case 1:
+        point_color = cv::Scalar(0, 165, 255);  // Orange
+        break;
+      case 2:
+        point_color = cv::Scalar(255, 255, 0);  // Cyan
+        break;
+      case 3:
+        point_color = cv::Scalar(255, 0, 255);  // Magenta
+        break;
+      case 4:
+        point_color = cv::Scalar(0, 255, 255);  // Yellow
+        break;
+      case 5:
+        point_color = cv::Scalar(255, 128, 128);  // Light Blue
+        break;
+    }
+
+    for (const auto& pt : line.points) {
+      // Points are already in absolute coordinates
+      cv::Point center(static_cast<int>(pt.x), static_cast<int>(pt.y));
+      cv::circle(output_img, center, 3, point_color, -1);  // Filled circle
+    }
   }
 
   // Draw calibration visualization

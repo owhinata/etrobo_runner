@@ -8,11 +8,23 @@
 
 class AdaptiveLineTracker {
  public:
+  // Structure to hold tracked line information for each contour
+  struct TrackedLine {
+    int contour_id;                   // Contour index
+    std::vector<cv::Point2d> points;  // Segment points for this contour
+    double area;                      // Contour area
+
+    TrackedLine(int id = -1, double a = 0.0) : contour_id(id), area(a) {}
+  };
+
   explicit AdaptiveLineTracker(rclcpp::Node* node = nullptr);
   ~AdaptiveLineTracker();
 
-  // Main tracking function (returns points in mask's coordinate system)
-  std::vector<cv::Point2d> track_line(const cv::Mat& black_mask);
+  // Main tracking function (returns tracked lines per contour in mask's
+  // coordinate system) Optional total_processing_ms parameter to include in log
+  // output
+  std::vector<TrackedLine> track_line(const cv::Mat& black_mask,
+                                      double total_processing_ms = -1.0);
 
   // Reset the tracker
   void reset();

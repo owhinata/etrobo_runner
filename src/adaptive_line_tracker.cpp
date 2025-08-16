@@ -3,6 +3,7 @@
 #include "src/adaptive_line_tracker.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <map>
 #include <opencv2/opencv.hpp>
@@ -14,7 +15,8 @@ class AdaptiveLineTracker::Impl {
   explicit Impl(rclcpp::Node* node);
   ~Impl() = default;
 
-  std::vector<cv::Point2d> track_line(const cv::Mat& black_mask);
+  std::vector<AdaptiveLineTracker::TrackedLine> track_line(
+      const cv::Mat& black_mask, double total_processing_ms = -1.0);
   void reset();
   double get_confidence() const { return confidence_; }
   void set_config(const Config& config) { config_ = config; }
@@ -55,9 +57,9 @@ AdaptiveLineTracker::AdaptiveLineTracker(rclcpp::Node* node)
 
 AdaptiveLineTracker::~AdaptiveLineTracker() = default;
 
-std::vector<cv::Point2d> AdaptiveLineTracker::track_line(
-    const cv::Mat& black_mask) {
-  return pimpl->track_line(black_mask);
+std::vector<AdaptiveLineTracker::TrackedLine> AdaptiveLineTracker::track_line(
+    const cv::Mat& black_mask, double total_processing_ms) {
+  return pimpl->track_line(black_mask, total_processing_ms);
 }
 
 void AdaptiveLineTracker::reset() { pimpl->reset(); }
@@ -82,13 +84,18 @@ void AdaptiveLineTracker::Impl::reset() {
   confidence_ = 0.0;
 }
 
-std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
-    const cv::Mat& black_mask) {
+std::vector<AdaptiveLineTracker::TrackedLine>
+AdaptiveLineTracker::Impl::track_line(const cv::Mat& black_mask,
+                                      double total_processing_ms) {
   tracked_points_.clear();
+  std::vector<AdaptiveLineTracker::TrackedLine> result;
 
   if (black_mask.empty()) {
-    return tracked_points_;
+    return result;
   }
+
+  // Timing start
+  const auto t_start = std::chrono::steady_clock::now();
 
   // Step 1: Frame counter for debugging
   static int frame_count = 0;
@@ -141,31 +148,53 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     }
   }
 
-  // Step 5: Filter contour groups and collect valid points
-  std::vector<cv::Point2d> candidate_points;
+  // Step 5: Build TrackedLine structures for each contour
   const size_t MIN_POINTS_PER_CONTOUR =
-      5;  // Minimum points to consider a contour valid
+      5;  // Minimum points to consider a contour valid for tracking
 
-  std::vector<int>
-      all_segment_counts;  // Store segment count for ALL contours with segments
-  for (const auto& [contour_idx, points] : contour_points) {
-    all_segment_counts.push_back(points.size());
-    if (points.size() >= MIN_POINTS_PER_CONTOUR) {
-      // Add all points from valid contours
-      for (const auto& pt : points) {
-        candidate_points.push_back(pt);
+  // Build segment counts for logging
+  std::vector<int> all_segment_counts;
+
+  for (size_t i = 0; i < contours.size(); i++) {
+    // Create TrackedLine for this contour
+    AdaptiveLineTracker::TrackedLine tracked_line;
+    tracked_line.contour_id = i;
+    tracked_line.area = cv::contourArea(contours[i]);
+
+    auto it = contour_points.find(i);
+    if (it != contour_points.end()) {
+      // This contour has segments
+      tracked_line.points = it->second;
+      all_segment_counts.push_back(it->second.size());
+
+      // Sort points by y coordinate (descending, since bottom is higher y
+      // value)
+      std::sort(tracked_line.points.begin(), tracked_line.points.end(),
+                [](const cv::Point2d& a, const cv::Point2d& b) {
+                  return a.y > b.y;  // Bottom to top
+                });
+
+      // Add to result if it has enough points
+      if (tracked_line.points.size() >= MIN_POINTS_PER_CONTOUR) {
+        result.push_back(tracked_line);
       }
+    } else {
+      // This valid contour has no segments
+      all_segment_counts.push_back(0);
+      // Still add to result with empty points (to preserve contour information)
+      result.push_back(tracked_line);
     }
   }
 
-  // Sort by y coordinate (descending, since bottom is higher y value)
-  std::sort(candidate_points.begin(), candidate_points.end(),
-            [](const cv::Point2d& a, const cv::Point2d& b) {
-              return a.y > b.y;  // Bottom to top
-            });
-
-  // Log summary every frame
+  // Log summary every frame with timing
   if (node_) {
+    // Calculate detection processing time
+    const auto t_end = std::chrono::steady_clock::now();
+    const double detection_ms =
+        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
+            t_end - t_start)
+            .count();
+
     // Build points string showing all contours with segments
     std::string points_info = " [points:";
     for (size_t i = 0; i < all_segment_counts.size(); i++) {
@@ -174,18 +203,31 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     }
     points_info += "]";
 
-    RCLCPP_INFO(node_->get_logger(),
-                "Detection: %d/%d scans, %zu/%zu contours valid%s",
-                successful_detections, total_scans, contours.size(),
-                all_contours.size(), points_info.c_str());
+    // Include total processing time if provided
+    if (total_processing_ms >= 0) {
+      RCLCPP_INFO(
+          node_->get_logger(),
+          "Detection: %d/%d scans, %zu/%zu contours valid%s (total: %.2f ms)",
+          successful_detections, total_scans, contours.size(),
+          all_contours.size(), points_info.c_str(), total_processing_ms);
+    } else {
+      RCLCPP_INFO(node_->get_logger(),
+                  "Detection: %d/%d scans, %zu/%zu contours valid%s (%.2f ms)",
+                  successful_detections, total_scans, contours.size(),
+                  all_contours.size(), points_info.c_str(), detection_ms);
+    }
   }
 
-  // Step 7: Return results (without smoothing)
-  // Note: Smoothing is disabled as it causes issues with branches
-  // where points from different branches get averaged together
-  tracked_points_ = candidate_points;
+  // Step 7: Return results
+  // Note: Keep tracked_points_ for backward compatibility if needed
+  tracked_points_.clear();
+  for (const auto& line : result) {
+    for (const auto& pt : line.points) {
+      tracked_points_.push_back(pt);
+    }
+  }
 
-  return tracked_points_;
+  return result;
 }
 
 std::vector<AdaptiveLineTracker::Impl::Segment>
