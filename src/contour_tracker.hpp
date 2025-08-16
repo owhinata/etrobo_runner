@@ -45,6 +45,10 @@ class ContourTracker {
     max_distance_threshold_ = distance;
   }
   void set_min_contour_area(double area) { min_contour_area_ = area; }
+  void set_debug_enabled(bool enabled) { debug_enabled_ = enabled; }
+  void set_process_noise(double noise) { process_noise_ = noise; }
+  void set_measurement_noise(double noise) { measurement_noise_ = noise; }
+  void set_speed_threshold(double speed) { speed_threshold_ = speed; }
 
  private:
   // Calculate centroid of contour
@@ -69,9 +73,13 @@ class ContourTracker {
   int next_id_;
 
   // Tracking parameters
-  int max_missed_frames_;          // Remove after this many missed frames
-  double max_distance_threshold_;  // Maximum distance for matching (pixels)
-  double min_contour_area_;        // Minimum area to track
+  int max_missed_frames_;            // Remove after this many missed frames
+  double max_distance_threshold_;    // Maximum distance for matching (pixels)
+  double min_contour_area_;          // Minimum area to track
+  bool debug_enabled_ = false;       // Enable debug logging
+  double process_noise_ = 1e-2;      // Kalman filter process noise
+  double measurement_noise_ = 5e-2;  // Kalman filter measurement noise
+  double speed_threshold_ = 5.0;     // Speed threshold for adaptive tracking
 };
 
 #endif  // CONTOUR_TRACKER_HPP_

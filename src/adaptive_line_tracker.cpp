@@ -169,7 +169,7 @@ AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {
   contour_tracker_ = std::make_unique<ContourTracker>();
   // Configure tracker
   contour_tracker_->set_max_missed_frames(5);
-  contour_tracker_->set_max_distance_threshold(50.0);
+  contour_tracker_->set_max_distance_threshold(75.0);  // Increased for curves
   contour_tracker_->set_min_contour_area(20.0);
 }
 
@@ -198,13 +198,24 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   // Tracking parameters
   int tracker_max_missed =
       node_->declare_parameter<int>("tracker_max_missed_frames", 5);
-  double tracker_max_dist =
-      node_->declare_parameter<double>("tracker_max_distance", 50.0);
+  double tracker_max_dist = node_->declare_parameter<double>(
+      "tracker_max_distance", 75.0);  // Increased for curves
+  bool tracker_debug = node_->declare_parameter<bool>("tracker_debug", false);
+  double tracker_process_noise =
+      node_->declare_parameter<double>("tracker_process_noise", 1e-2);
+  double tracker_measurement_noise =
+      node_->declare_parameter<double>("tracker_measurement_noise", 5e-2);
+  double tracker_speed_threshold =
+      node_->declare_parameter<double>("tracker_speed_threshold", 5.0);
 
   // Configure tracker with parameters
   if (contour_tracker_) {
     contour_tracker_->set_max_missed_frames(tracker_max_missed);
     contour_tracker_->set_max_distance_threshold(tracker_max_dist);
+    contour_tracker_->set_debug_enabled(tracker_debug);
+    contour_tracker_->set_process_noise(tracker_process_noise);
+    contour_tracker_->set_measurement_noise(tracker_measurement_noise);
+    contour_tracker_->set_speed_threshold(tracker_speed_threshold);
   }
 
   // Line tracking configuration parameters
@@ -275,6 +286,26 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
   } else if (name == "tracker_max_distance") {
     if (contour_tracker_) {
       contour_tracker_->set_max_distance_threshold(param.as_double());
+    }
+    return true;
+  } else if (name == "tracker_debug") {
+    if (contour_tracker_) {
+      contour_tracker_->set_debug_enabled(param.as_bool());
+    }
+    return true;
+  } else if (name == "tracker_process_noise") {
+    if (contour_tracker_) {
+      contour_tracker_->set_process_noise(param.as_double());
+    }
+    return true;
+  } else if (name == "tracker_measurement_noise") {
+    if (contour_tracker_) {
+      contour_tracker_->set_measurement_noise(param.as_double());
+    }
+    return true;
+  } else if (name == "tracker_speed_threshold") {
+    if (contour_tracker_) {
+      contour_tracker_->set_speed_threshold(param.as_double());
     }
     return true;
   }
