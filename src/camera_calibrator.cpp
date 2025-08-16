@@ -108,21 +108,19 @@ class CameraCalibrator::Impl {
   cv::Mat last_calib_hsv_mask_;
 
   // Calibration parameters (owned by this class)
-  double camera_height_meters_;
-  double landmark_distance_meters_;
-  double calib_timeout_sec_;
-  std::vector<int64_t> calib_roi_;
-  int calib_hsv_s_max_;
-  int calib_hsv_v_min_;
-  int calib_hsv_v_max_;
-  int calib_min_area_;
+  double camera_height_meters_{0.2};
+  double landmark_distance_meters_{0.59};
+  double calib_timeout_sec_{60.0};
+  std::vector<int64_t> calib_roi_{200, 150, 240, 180};
+  int calib_hsv_s_max_{16};
+  int calib_hsv_v_min_{100};
+  int calib_hsv_v_max_{168};
+  int calib_min_area_{80};
 };
 
 // CameraCalibrator public interface implementation
 CameraCalibrator::CameraCalibrator(LineDetectorNode* node)
-    : pimpl_(std::make_unique<Impl>(node)) {
-  declare_parameters();
-}
+    : pimpl_(std::make_unique<Impl>(node)) {}
 
 CameraCalibrator::~CameraCalibrator() = default;
 

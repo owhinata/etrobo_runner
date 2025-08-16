@@ -66,8 +66,6 @@ class LineDetectorNode::Impl {
   LineDetectorNode::CameraIntrinsics get_camera_intrinsics() const;
 
  private:
-  cv::Mat extract_black_regions(const cv::Mat& img);
-  void configure_line_tracker();  // Helper to configure tracker parameters
   void publish_lines(
       const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines);
   void perform_localization(
@@ -75,10 +73,9 @@ class LineDetectorNode::Impl {
       const cv::Point2d& landmark_pos, bool found);
   void publish_visualization(
       const sensor_msgs::msg::Image::ConstSharedPtr msg,
-      const cv::Mat& original_img, const cv::Mat& edges,
-      const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
-      const cv::Rect& roi_rect,
-      const std::vector<std::vector<cv::Point>>& contours);
+      const cv::Mat& original_img,
+      const AdaptiveLineTracker::DetectionResult& detection_result,
+      const cv::Rect& roi_rect);
 
   // Node reference
   LineDetectorNode* node_;
@@ -100,15 +97,9 @@ class LineDetectorNode::Impl {
   // Image preprocessing
   std::vector<int64_t> roi_;
 
-  // HSV mask (only parameters actually used for black line detection)
-  int hsv_upper_v_;  // Upper threshold for V channel to detect black
-  int hsv_dilate_kernel_;
-  int hsv_dilate_iter_;
-
   // Visualization
   bool publish_image_;
   bool show_edges_;
-  bool show_contours_;
 
   // Localization parameters
   double landmark_map_x_;
@@ -154,14 +145,12 @@ LineDetectorNode::CameraIntrinsics LineDetectorNode::get_camera_intrinsics()
 LineDetectorNode::Impl::Impl(LineDetectorNode* node) : node_(node) {
   RCLCPP_INFO(node_->get_logger(), "Initializing LineDetectorNode");
 
-  // Declare all parameters
-  declare_all_parameters();
-
-  // Initialize calibrator
+  // Initialize components first
   calibrator_ = std::make_unique<CameraCalibrator>(node_);
-
-  // Initialize adaptive line tracker with node pointer for logging
   line_tracker_ = std::make_unique<AdaptiveLineTracker>(node_);
+
+  // Declare all parameters (including components)
+  declare_all_parameters();
 
   // Setup ROS entities
   setup_publishers();
@@ -181,27 +170,27 @@ void LineDetectorNode::Impl::declare_all_parameters() {
   roi_ = node_->declare_parameter<std::vector<int64_t>>("roi",
                                                         std::vector<int64_t>{});
 
-  // HSV mask (only parameters actually used for black line detection)
-  hsv_upper_v_ = node_->declare_parameter<int>("hsv_upper_v", 100);
-  hsv_dilate_kernel_ = node_->declare_parameter<int>("hsv_dilate_kernel", 3);
-  hsv_dilate_iter_ = node_->declare_parameter<int>("hsv_dilate_iter", 1);
-
   // Visualization
   publish_image_ =
       node_->declare_parameter<bool>("publish_image_with_lines", false);
   show_edges_ = node_->declare_parameter<bool>("show_edges", false);
-  show_contours_ = node_->declare_parameter<bool>("show_contours", false);
 
   // Localization parameters
   landmark_map_x_ = node_->declare_parameter<double>("landmark_map_x", -0.409);
   landmark_map_y_ = node_->declare_parameter<double>("landmark_map_y", 1.0);
+
+  // Declare parameters for components
+  if (calibrator_) {
+    calibrator_->declare_parameters();
+  }
+  if (line_tracker_) {
+    line_tracker_->declare_parameters();
+  }
 }
 
 void LineDetectorNode::Impl::sanitize_parameters() {
-  // HSV ranges (only parameters actually used)
-  hsv_upper_v_ = std::max(0, std::min(255, hsv_upper_v_));
-  hsv_dilate_kernel_ = std::max(0, hsv_dilate_kernel_);
-  hsv_dilate_iter_ = std::max(0, hsv_dilate_iter_);
+  // Currently no parameters need sanitization in LineDetectorNode
+  // HSV parameters are handled by AdaptiveLineTracker
 }
 
 void LineDetectorNode::Impl::setup_publishers() {
@@ -247,18 +236,15 @@ LineDetectorNode::Impl::on_parameters_set(
       continue;  // Parameter was handled by CameraCalibrator
     }
 
+    // Try AdaptiveLineTracker parameters
+    if (line_tracker_ && line_tracker_->try_update_parameter(param)) {
+      continue;  // Parameter was handled by AdaptiveLineTracker
+    }
+
     const std::string& name = param.get_name();
     // Update processing parameters dynamically
-    if (name == "hsv_upper_v")
-      hsv_upper_v_ = param.as_int();
-    else if (name == "hsv_dilate_kernel")
-      hsv_dilate_kernel_ = param.as_int();
-    else if (name == "hsv_dilate_iter")
-      hsv_dilate_iter_ = param.as_int();
-    else if (name == "show_edges")
+    if (name == "show_edges")
       show_edges_ = param.as_bool();
-    else if (name == "show_contours")
-      show_contours_ = param.as_bool();
     else if (name == "publish_image_with_lines") {
       publish_image_ = param.as_bool();
       if (publish_image_ && !image_pub_) {
@@ -336,32 +322,13 @@ void LineDetectorNode::Impl::image_callback(
   }
 
   // Step 3: Line detection using adaptive tracker
-  // Extract black regions only from ROI area (work_img is already ROI-cropped)
-  cv::Mat black_mask = extract_black_regions(work_img);
+  AdaptiveLineTracker::DetectionResult detection_result;
+  line_tracker_->process_frame(original_img, roi_rect, detection_result);
 
-  // Find contours for visualization
-  std::vector<std::vector<cv::Point>> contours;
-  cv::Mat mask_for_contours = black_mask.clone();
-  cv::findContours(mask_for_contours, contours, cv::RETR_EXTERNAL,
-                   cv::CHAIN_APPROX_NONE);
-
-  // Configure and track the black line (gray disk is already excluded by HSV
-  // thresholding)
-  configure_line_tracker();
-  auto detection_result = line_tracker_->track_line(black_mask);
-
-  // Convert from relative (mask) coordinates to absolute (image) coordinates
-  std::vector<AdaptiveLineTracker::TrackedLine> tracked_lines;
-  for (const auto& line_rel : detection_result.tracked_lines) {
-    AdaptiveLineTracker::TrackedLine line_abs;
-    line_abs.contour_id = line_rel.contour_id;
-    line_abs.area = line_rel.area;
-    line_abs.points.reserve(line_rel.points.size());
-    for (const auto& pt : line_rel.points) {
-      line_abs.points.emplace_back(pt.x + roi_rect.x, pt.y + roi_rect.y);
-    }
-    tracked_lines.push_back(line_abs);
-  }
+  // Convert tracked lines to absolute coordinates (already in absolute
+  // coordinates)
+  std::vector<AdaptiveLineTracker::TrackedLine> tracked_lines =
+      detection_result.tracked_lines;
 
   // Step 4: Log detection results
   const auto t1 = std::chrono::steady_clock::now();
@@ -394,8 +361,7 @@ void LineDetectorNode::Impl::image_callback(
 
   // Step 7: Visualization
   if (publish_image_ && image_pub_) {
-    publish_visualization(msg, original_img, black_mask, tracked_lines,
-                          roi_rect, contours);
+    publish_visualization(msg, original_img, detection_result, roi_rect);
   }
 
   // Step 8: Additional logging for specific states
@@ -414,65 +380,6 @@ void LineDetectorNode::Impl::image_callback(
                  "Calibrating: %zu points tracked in %.2f ms", total_points,
                  total_ms);
   }
-}
-
-cv::Mat LineDetectorNode::Impl::extract_black_regions(const cv::Mat& img) {
-  cv::Mat black_mask;
-
-  // Convert to HSV if needed
-  cv::Mat hsv;
-  if (img.channels() == 3) {
-    cv::cvtColor(img, hsv, cv::COLOR_BGR2HSV);
-  } else {
-    // For grayscale, create pseudo-HSV with V channel only
-    cv::Mat channels[3];
-    channels[0] = cv::Mat::zeros(img.size(), CV_8UC1);  // H = 0
-    channels[1] = cv::Mat::zeros(img.size(), CV_8UC1);  // S = 0
-    channels[2] = img;                                  // V = grayscale value
-    cv::merge(channels, 3, hsv);
-  }
-
-  // Extract black regions (low V value)
-  // Black line typically has V < 50-80 depending on lighting
-
-  cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(180, 255, hsv_upper_v_),
-              black_mask);
-
-  // Apply morphological operations to clean up
-  if (hsv_dilate_iter_ > 0 && hsv_dilate_kernel_ > 0) {
-    cv::Mat kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(hsv_dilate_kernel_, hsv_dilate_kernel_));
-
-    // Remove small noise first
-    cv::morphologyEx(black_mask, black_mask, cv::MORPH_OPEN, kernel);
-
-    // Then close small gaps in the line
-    cv::morphologyEx(black_mask, black_mask, cv::MORPH_CLOSE, kernel);
-
-    // Additional erosion to remove edge noise
-    cv::erode(black_mask, black_mask, kernel, cv::Point(-1, -1), 1);
-  }
-
-  return black_mask;
-}
-
-void LineDetectorNode::Impl::configure_line_tracker() {
-  if (!line_tracker_) {
-    RCLCPP_WARN(node_->get_logger(), "Line tracker not initialized");
-    return;
-  }
-
-  // Configure tracker (can be made dynamic via parameters in the future)
-  AdaptiveLineTracker::Config config;
-  config.max_line_width =
-      50.0;  // Strict: black line should be 20-40 pixels typically
-  config.min_line_width = 6.0;     // Allow thinner lines to be detected
-  config.max_lateral_jump = 20.0;  // Reduced: line shouldn't jump too much
-  config.scan_step = 5;
-  config.position_weight = 0.5;  // Increase weight for position continuity
-  config.prediction_weight = 0.3;
-  config.width_weight = 0.2;
-  line_tracker_->set_config(config);
 }
 
 void LineDetectorNode::Impl::publish_lines(
@@ -575,103 +482,14 @@ void LineDetectorNode::Impl::perform_localization(
 
 void LineDetectorNode::Impl::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
-    const cv::Mat& original_img, const cv::Mat& edges,
-    const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
-    const cv::Rect& roi_rect,
-    const std::vector<std::vector<cv::Point>>& contours) {
-  cv::Mat output_img;
-  if (show_edges_) {
-    cv::cvtColor(edges, output_img, cv::COLOR_GRAY2BGR);
-  } else {
-    output_img = original_img.clone();
-  }
+    const cv::Mat& original_img,
+    const AdaptiveLineTracker::DetectionResult& detection_result,
+    const cv::Rect& roi_rect) {
+  cv::Mat output_img = original_img.clone();
 
-  // Draw ROI rectangle
-  cv::rectangle(output_img, roi_rect, cv::Scalar(255, 255, 0), 1);
-
-  // Draw contours only if show_contours is enabled
-  if (show_contours_) {
-    // Draw only valid contours (area >= 20)
-    const double MIN_CONTOUR_AREA = 20.0;  // Same threshold as in tracker
-    int valid_contour_idx = 0;
-    for (size_t i = 0; i < contours.size(); i++) {
-      // Skip small contours
-      double area = cv::contourArea(contours[i]);
-      if (area < MIN_CONTOUR_AREA) {
-        continue;  // Don't visualize small contours
-      }
-
-      // Create offset contour for correct positioning
-      std::vector<std::vector<cv::Point>> contour_to_draw;
-      std::vector<cv::Point> offset_contour;
-      for (const auto& pt : contours[i]) {
-        offset_contour.push_back(
-            cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
-      }
-      contour_to_draw.push_back(offset_contour);
-
-      // Use different colors for different valid contours
-      cv::Scalar contour_color;
-      switch (valid_contour_idx % 6) {
-        case 0:
-          contour_color = cv::Scalar(255, 0, 0);
-          break;  // Blue
-        case 1:
-          contour_color = cv::Scalar(0, 255, 255);
-          break;  // Yellow
-        case 2:
-          contour_color = cv::Scalar(255, 0, 255);
-          break;  // Magenta
-        case 3:
-          contour_color = cv::Scalar(0, 255, 128);
-          break;  // Green-yellow
-        case 4:
-          contour_color = cv::Scalar(255, 128, 0);
-          break;  // Orange
-        case 5:
-          contour_color = cv::Scalar(128, 0, 255);
-          break;  // Purple
-      }
-
-      // Draw contour outline (thicker line for better visibility)
-      cv::drawContours(output_img, contour_to_draw, 0, contour_color, 2);
-      valid_contour_idx++;
-    }
-  }
-
-  // Draw tracked points with different colors for different contours
-  for (size_t line_idx = 0; line_idx < tracked_lines.size(); line_idx++) {
-    const auto& line = tracked_lines[line_idx];
-
-    // Use different colors for different contours
-    cv::Scalar point_color;
-    switch (line.contour_id % 6) {
-      case 0:
-        point_color = cv::Scalar(0, 255, 0);  // Green
-        break;
-      case 1:
-        point_color = cv::Scalar(0, 165, 255);  // Orange
-        break;
-      case 2:
-        point_color = cv::Scalar(255, 255, 0);  // Cyan
-        break;
-      case 3:
-        point_color = cv::Scalar(255, 0, 255);  // Magenta
-        break;
-      case 4:
-        point_color = cv::Scalar(0, 255, 255);  // Yellow
-        break;
-      case 5:
-        point_color = cv::Scalar(255, 128, 128);  // Light Blue
-        break;
-    }
-
-    for (const auto& pt : line.points) {
-      // Points are already in absolute coordinates
-      cv::Point center(static_cast<int>(pt.x), static_cast<int>(pt.y));
-      cv::circle(output_img, center, 3, point_color, -1);  // Filled circle
-    }
-  }
+  // Delegate visualization to AdaptiveLineTracker
+  line_tracker_->draw_visualization_overlay(output_img, detection_result,
+                                            roi_rect);
 
   // Draw calibration visualization
   if (state_ == State::Calibrating) {

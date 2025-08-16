@@ -6,6 +6,9 @@
 #include <rclcpp/rclcpp.hpp>
 #include <vector>
 
+// Forward declaration
+class LineDetectorNode;
+
 class AdaptiveLineTracker {
  public:
   // Structure to hold tracked line information for each contour
@@ -27,12 +30,23 @@ class AdaptiveLineTracker {
     std::vector<int> segment_counts;  // Segment count per valid contour
   };
 
-  explicit AdaptiveLineTracker(rclcpp::Node* node = nullptr);
+  explicit AdaptiveLineTracker(LineDetectorNode* node);
   ~AdaptiveLineTracker();
 
-  // Main tracking function (returns detection results with tracked lines
-  // and statistics in mask's coordinate system)
-  DetectionResult track_line(const cv::Mat& black_mask);
+  // Initialize and declare tracking parameters
+  void declare_parameters();
+
+  // Try to update a parameter if it belongs to AdaptiveLineTracker
+  bool try_update_parameter(const rclcpp::Parameter& param);
+
+  // Main processing method for line detection
+  // Returns true if detection was successful
+  bool process_frame(const cv::Mat& img, const cv::Rect& roi,
+                     DetectionResult& result);
+
+  // Draw visualization overlay for image_with_lines output
+  void draw_visualization_overlay(cv::Mat& img, const DetectionResult& result,
+                                  const cv::Rect& roi) const;
 
   // Reset the tracker
   void reset();
