@@ -85,23 +85,31 @@ ContourTracker::ContourTracker()
 
 void ContourTracker::update(
     const std::vector<std::vector<cv::Point>>& contours) {
-  // Debug: Frame summary
-  static int frame_count = 0;
-  frame_count++;
-  if (debug_enabled_ && frame_count % 10 == 0) {  // Every 10 frames
-    printf("\n[Tracker] === Frame %d Summary ===\n", frame_count);
-    printf("[Tracker] Tracked: %zu, New contours: %zu\n",
-           tracked_contours_.size(), contours.size());
+  // If tracking is disabled, clear tracked contours and return
+  if (!enabled_) {
+    tracked_contours_.clear();
+    return;
+  }
 
-    // Log each tracked contour's state
-    for (const auto& [id, tracked] : tracked_contours_) {
-      float vx = tracked.kf.statePost.at<float>(2);
-      float vy = tracked.kf.statePost.at<float>(3);
-      float speed = std::sqrt(vx * vx + vy * vy);
-      printf(
-          "  ID%d: pos(%.0f,%.0f) vel(%.1f,%.1f) speed=%.1f age=%d miss=%d\n",
-          id, tracked.centroid.x, tracked.centroid.y, vx, vy, speed,
-          tracked.age, tracked.missed_frames);
+  // Debug: Frame summary
+  if (debug_enabled_) {
+    static int frame_count = 0;
+    frame_count++;
+    if (frame_count % 10 == 0) {  // Every 10 frames
+      printf("\n[Tracker] === Frame %d Summary ===\n", frame_count);
+      printf("[Tracker] Tracked: %zu, New contours: %zu\n",
+             tracked_contours_.size(), contours.size());
+
+      // Log each tracked contour's state
+      for (const auto& [id, tracked] : tracked_contours_) {
+        float vx = tracked.kf.statePost.at<float>(2);
+        float vy = tracked.kf.statePost.at<float>(3);
+        float speed = std::sqrt(vx * vx + vy * vy);
+        printf(
+            "  ID%d: pos(%.0f,%.0f) vel(%.1f,%.1f) speed=%.1f age=%d miss=%d\n",
+            id, tracked.centroid.x, tracked.centroid.y, vx, vy, speed,
+            tracked.age, tracked.missed_frames);
+      }
     }
   }
 
@@ -117,16 +125,20 @@ void ContourTracker::update(
   std::vector<double> new_areas;
   std::vector<bool> used_indices(contours.size(), false);
 
-  for (const auto& contour : contours) {
-    double area = cv::contourArea(contour);
+  new_centroids.reserve(contours.size());
+  new_bboxes.reserve(contours.size());
+  new_areas.reserve(contours.size());
+
+  for (size_t i = 0; i < contours.size(); ++i) {
+    double area = cv::contourArea(contours[i]);
     if (area < min_contour_area_) {
       new_centroids.push_back(cv::Point2f(-1, -1));  // Invalid
       new_bboxes.push_back(cv::Rect());
       new_areas.push_back(0);
-      used_indices[new_centroids.size() - 1] = true;  // Skip this contour
+      used_indices[i] = true;  // Skip this contour
     } else {
-      new_centroids.push_back(calculate_centroid(contour));
-      new_bboxes.push_back(cv::boundingRect(contour));
+      new_centroids.push_back(calculate_centroid(contours[i]));
+      new_bboxes.push_back(cv::boundingRect(contours[i]));
       new_areas.push_back(area);
     }
   }

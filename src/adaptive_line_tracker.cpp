@@ -196,6 +196,8 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   show_mask_ = node_->declare_parameter<bool>("show_mask", false);
 
   // Tracking parameters
+  bool tracker_enabled =
+      node_->declare_parameter<bool>("tracker_enabled", true);
   int tracker_max_missed =
       node_->declare_parameter<int>("tracker_max_missed_frames", 5);
   double tracker_max_dist = node_->declare_parameter<double>(
@@ -210,6 +212,7 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
 
   // Configure tracker with parameters
   if (contour_tracker_) {
+    contour_tracker_->set_enabled(tracker_enabled);
     contour_tracker_->set_max_missed_frames(tracker_max_missed);
     contour_tracker_->set_max_distance_threshold(tracker_max_dist);
     contour_tracker_->set_debug_enabled(tracker_debug);
@@ -278,35 +281,33 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
   } else if (name == "min_segments_curve") {
     config_.min_segments_curve = param.as_int();
     return true;
+  }
+
+  // Tracker parameter updates
+  if (!contour_tracker_) {
+    return false;
+  }
+
+  if (name == "tracker_enabled") {
+    contour_tracker_->set_enabled(param.as_bool());
+    return true;
   } else if (name == "tracker_max_missed_frames") {
-    if (contour_tracker_) {
-      contour_tracker_->set_max_missed_frames(param.as_int());
-    }
+    contour_tracker_->set_max_missed_frames(param.as_int());
     return true;
   } else if (name == "tracker_max_distance") {
-    if (contour_tracker_) {
-      contour_tracker_->set_max_distance_threshold(param.as_double());
-    }
+    contour_tracker_->set_max_distance_threshold(param.as_double());
     return true;
   } else if (name == "tracker_debug") {
-    if (contour_tracker_) {
-      contour_tracker_->set_debug_enabled(param.as_bool());
-    }
+    contour_tracker_->set_debug_enabled(param.as_bool());
     return true;
   } else if (name == "tracker_process_noise") {
-    if (contour_tracker_) {
-      contour_tracker_->set_process_noise(param.as_double());
-    }
+    contour_tracker_->set_process_noise(param.as_double());
     return true;
   } else if (name == "tracker_measurement_noise") {
-    if (contour_tracker_) {
-      contour_tracker_->set_measurement_noise(param.as_double());
-    }
+    contour_tracker_->set_measurement_noise(param.as_double());
     return true;
   } else if (name == "tracker_speed_threshold") {
-    if (contour_tracker_) {
-      contour_tracker_->set_speed_threshold(param.as_double());
-    }
+    contour_tracker_->set_speed_threshold(param.as_double());
     return true;
   }
 
@@ -317,15 +318,8 @@ bool AdaptiveLineTracker::Impl::process_frame(
     const cv::Mat& img, AdaptiveLineTracker::DetectionResult& result) {
   tracked_points_.clear();
 
-  // Clear result
-  result.tracked_lines.clear();
-  result.segment_counts.clear();
-  result.total_scans = 0;
-  result.successful_detections = 0;
-  result.total_contours = 0;
-  result.valid_contours = 0;
-
-  // Clear last result
+  // Clear result and last result
+  result = AdaptiveLineTracker::DetectionResult();
   last_result_ = AdaptiveLineTracker::DetectionResult();
 
   if (img.empty()) {
@@ -367,10 +361,10 @@ bool AdaptiveLineTracker::Impl::process_frame(
     RCLCPP_DEBUG(node_->get_logger(), "%s", tracking_info.c_str());
   }
 
-  // Convert tracked contours to vector for processing
-  // Filter by area here instead
-  const double MIN_CONTOUR_AREA = 20.0;
+  // Filter tracked contours by area and missed frames
+  constexpr double MIN_CONTOUR_AREA = 20.0;
   std::vector<std::vector<cv::Point>> contours;
+  contours.reserve(all_tracked.size());
   for (const auto& [id, tracked] : all_tracked) {
     if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
       contours.push_back(tracked.contour);

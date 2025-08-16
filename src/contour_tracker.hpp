@@ -40,6 +40,8 @@ class ContourTracker {
   std::vector<TrackedContour> get_stable_contours(int min_age = 3) const;
 
   // Configuration
+  void set_enabled(bool enabled) { enabled_ = enabled; }
+  bool is_enabled() const { return enabled_; }
   void set_max_missed_frames(int frames) { max_missed_frames_ = frames; }
   void set_max_distance_threshold(double distance) {
     max_distance_threshold_ = distance;
@@ -73,6 +75,7 @@ class ContourTracker {
   int next_id_;
 
   // Tracking parameters
+  bool enabled_ = true;              // Enable/disable tracking
   int max_missed_frames_;            // Remove after this many missed frames
   double max_distance_threshold_;    // Maximum distance for matching (pixels)
   double min_contour_area_;          // Minimum area to track
