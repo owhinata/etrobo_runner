@@ -3,11 +3,12 @@
 
 #include <memory>
 #include <opencv2/core.hpp>
+#include <rclcpp/rclcpp.hpp>
 #include <vector>
 
 class AdaptiveLineTracker {
  public:
-  AdaptiveLineTracker();
+  explicit AdaptiveLineTracker(rclcpp::Node* node = nullptr);
   ~AdaptiveLineTracker();
 
   // Main tracking function (returns points in mask's coordinate system)

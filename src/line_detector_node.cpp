@@ -44,9 +44,7 @@ static cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi) {
   return cv::Rect(x, y, w, h);
 }
 
-// =======================
 // Implementation class
-// =======================
 class LineDetectorNode::Impl {
  public:
   explicit Impl(LineDetectorNode* node);
@@ -107,6 +105,7 @@ class LineDetectorNode::Impl {
   // Visualization
   bool publish_image_;
   bool show_edges_;
+  bool show_contours_;
 
   // Localization parameters
   double landmark_map_x_;
@@ -136,9 +135,7 @@ class LineDetectorNode::Impl {
   std::mutex param_mutex_;
 };
 
-// =======================
 // LineDetectorNode
-// =======================
 LineDetectorNode::LineDetectorNode()
     : Node("etrobo_line_detector"), pimpl(std::make_unique<Impl>(this)) {
   RCLCPP_INFO(this->get_logger(), "LineDetectorNode initialized successfully");
@@ -151,9 +148,6 @@ LineDetectorNode::CameraIntrinsics LineDetectorNode::get_camera_intrinsics()
   return pimpl->get_camera_intrinsics();
 }
 
-// =======================
-// Impl implementation
-// =======================
 LineDetectorNode::Impl::Impl(LineDetectorNode* node) : node_(node) {
   RCLCPP_INFO(node_->get_logger(), "Initializing LineDetectorNode");
 
@@ -163,8 +157,8 @@ LineDetectorNode::Impl::Impl(LineDetectorNode* node) : node_(node) {
   // Initialize calibrator
   calibrator_ = std::make_unique<CameraCalibrator>(node_);
 
-  // Initialize adaptive line tracker
-  line_tracker_ = std::make_unique<AdaptiveLineTracker>();
+  // Initialize adaptive line tracker with node pointer for logging
+  line_tracker_ = std::make_unique<AdaptiveLineTracker>(node_);
 
   // Setup ROS entities
   setup_publishers();
@@ -193,6 +187,7 @@ void LineDetectorNode::Impl::declare_all_parameters() {
   publish_image_ =
       node_->declare_parameter<bool>("publish_image_with_lines", false);
   show_edges_ = node_->declare_parameter<bool>("show_edges", false);
+  show_contours_ = node_->declare_parameter<bool>("show_contours", false);
 
   // Localization parameters
   landmark_map_x_ = node_->declare_parameter<double>("landmark_map_x", -0.409);
@@ -259,6 +254,8 @@ LineDetectorNode::Impl::on_parameters_set(
       hsv_dilate_iter_ = param.as_int();
     else if (name == "show_edges")
       show_edges_ = param.as_bool();
+    else if (name == "show_contours")
+      show_contours_ = param.as_bool();
     else if (name == "publish_image_with_lines") {
       publish_image_ = param.as_bool();
       if (publish_image_ && !image_pub_) {
@@ -302,7 +299,6 @@ LineDetectorNode::Impl::get_camera_intrinsics() const {
   return LineDetectorNode::CameraIntrinsics{has_cam_info_, fx_, fy_, cx_, cy_};
 }
 
-// ===== Main image processing callback =====
 void LineDetectorNode::Impl::image_callback(
     const sensor_msgs::msg::Image::ConstSharedPtr msg) {
   const auto t0 = std::chrono::steady_clock::now();
@@ -358,14 +354,7 @@ void LineDetectorNode::Impl::image_callback(
     tracked_points.emplace_back(pt.x + roi_rect.x, pt.y + roi_rect.y);
   }
 
-  // Debug: Log tracked points
-  if (!tracked_points.empty()) {
-    RCLCPP_DEBUG(node_->get_logger(),
-                 "Tracked %zu points. First: (%.1f, %.1f), Last: (%.1f, %.1f)",
-                 tracked_points.size(), tracked_points.front().x,
-                 tracked_points.front().y, tracked_points.back().x,
-                 tracked_points.back().y);
-  }
+  // Frame counter for periodic logging (handled in tracker)
 
   // Step 4: Publish lines data
   publish_lines(tracked_points);
@@ -452,7 +441,7 @@ void LineDetectorNode::Impl::configure_line_tracker() {
   AdaptiveLineTracker::Config config;
   config.max_line_width =
       50.0;  // Strict: black line should be 20-40 pixels typically
-  config.min_line_width = 15.0;    // Increased: filter out thin noise
+  config.min_line_width = 6.0;     // Allow thinner lines to be detected
   config.max_lateral_jump = 20.0;  // Reduced: line shouldn't jump too much
   config.scan_step = 5;
   config.position_weight = 0.5;  // Increase weight for position continuity
@@ -558,41 +547,54 @@ void LineDetectorNode::Impl::publish_visualization(
   // Draw ROI rectangle
   cv::rectangle(output_img, roi_rect, cv::Scalar(255, 255, 0), 1);
 
-  // Draw contours (offset by ROI position)
-  for (size_t i = 0; i < contours.size(); i++) {
-    // Create offset contour for correct positioning
-    std::vector<std::vector<cv::Point>> contour_to_draw;
-    std::vector<cv::Point> offset_contour;
-    for (const auto& pt : contours[i]) {
-      offset_contour.push_back(cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
-    }
-    contour_to_draw.push_back(offset_contour);
+  // Draw contours only if show_contours is enabled
+  if (show_contours_) {
+    // Draw only valid contours (area >= 20)
+    const double MIN_CONTOUR_AREA = 20.0;  // Same threshold as in tracker
+    int valid_contour_idx = 0;
+    for (size_t i = 0; i < contours.size(); i++) {
+      // Skip small contours
+      double area = cv::contourArea(contours[i]);
+      if (area < MIN_CONTOUR_AREA) {
+        continue;  // Don't visualize small contours
+      }
 
-    // Use different colors for different contours
-    cv::Scalar contour_color;
-    switch (i % 6) {
-      case 0:
-        contour_color = cv::Scalar(255, 0, 0);
-        break;  // Blue
-      case 1:
-        contour_color = cv::Scalar(0, 255, 255);
-        break;  // Yellow
-      case 2:
-        contour_color = cv::Scalar(255, 0, 255);
-        break;  // Magenta
-      case 3:
-        contour_color = cv::Scalar(0, 255, 128);
-        break;  // Green-yellow
-      case 4:
-        contour_color = cv::Scalar(255, 128, 0);
-        break;  // Orange
-      case 5:
-        contour_color = cv::Scalar(128, 0, 255);
-        break;  // Purple
-    }
+      // Create offset contour for correct positioning
+      std::vector<std::vector<cv::Point>> contour_to_draw;
+      std::vector<cv::Point> offset_contour;
+      for (const auto& pt : contours[i]) {
+        offset_contour.push_back(
+            cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
+      }
+      contour_to_draw.push_back(offset_contour);
 
-    // Draw contour outline (thicker line for better visibility)
-    cv::drawContours(output_img, contour_to_draw, 0, contour_color, 2);
+      // Use different colors for different valid contours
+      cv::Scalar contour_color;
+      switch (valid_contour_idx % 6) {
+        case 0:
+          contour_color = cv::Scalar(255, 0, 0);
+          break;  // Blue
+        case 1:
+          contour_color = cv::Scalar(0, 255, 255);
+          break;  // Yellow
+        case 2:
+          contour_color = cv::Scalar(255, 0, 255);
+          break;  // Magenta
+        case 3:
+          contour_color = cv::Scalar(0, 255, 128);
+          break;  // Green-yellow
+        case 4:
+          contour_color = cv::Scalar(255, 128, 0);
+          break;  // Orange
+        case 5:
+          contour_color = cv::Scalar(128, 0, 255);
+          break;  // Purple
+      }
+
+      // Draw contour outline (thicker line for better visibility)
+      cv::drawContours(output_img, contour_to_draw, 0, contour_color, 2);
+      valid_contour_idx++;
+    }
   }
 
   // Draw tracked points (fixed green color, radius 3)
