@@ -9,6 +9,7 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 
+#include "src/contour_tracker.hpp"
 #include "src/line_detector_node.hpp"
 
 // Implementation class
@@ -124,6 +125,9 @@ class AdaptiveLineTracker::Impl {
 
   // Last black mask for visualization
   cv::Mat last_black_mask_;
+
+  // Contour tracker for temporal tracking
+  std::unique_ptr<ContourTracker> contour_tracker_;
 };
 
 // AdaptiveLineTracker
@@ -161,7 +165,13 @@ AdaptiveLineTracker::Config AdaptiveLineTracker::get_config() const {
   return pimpl->get_config();
 }
 
-AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {}
+AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {
+  contour_tracker_ = std::make_unique<ContourTracker>();
+  // Configure tracker
+  contour_tracker_->set_max_missed_frames(5);
+  contour_tracker_->set_max_distance_threshold(50.0);
+  contour_tracker_->set_min_contour_area(20.0);
+}
 
 void AdaptiveLineTracker::Impl::reset() {
   tracked_points_.clear();
@@ -184,6 +194,18 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   // Visualization parameters
   show_contours_ = node_->declare_parameter<bool>("show_contours", false);
   show_mask_ = node_->declare_parameter<bool>("show_mask", false);
+
+  // Tracking parameters
+  int tracker_max_missed =
+      node_->declare_parameter<int>("tracker_max_missed_frames", 5);
+  double tracker_max_dist =
+      node_->declare_parameter<double>("tracker_max_distance", 50.0);
+
+  // Configure tracker with parameters
+  if (contour_tracker_) {
+    contour_tracker_->set_max_missed_frames(tracker_max_missed);
+    contour_tracker_->set_max_distance_threshold(tracker_max_dist);
+  }
 
   // Line tracking configuration parameters
   config_.scan_step = node_->declare_parameter<int>("line_scan_step", 5);
@@ -245,6 +267,16 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
   } else if (name == "min_segments_curve") {
     config_.min_segments_curve = param.as_int();
     return true;
+  } else if (name == "tracker_max_missed_frames") {
+    if (contour_tracker_) {
+      contour_tracker_->set_max_missed_frames(param.as_int());
+    }
+    return true;
+  } else if (name == "tracker_max_distance") {
+    if (contour_tracker_) {
+      contour_tracker_->set_max_distance_threshold(param.as_double());
+    }
+    return true;
   }
 
   return false;
@@ -287,13 +319,30 @@ bool AdaptiveLineTracker::Impl::process_frame(
   cv::findContours(mask_copy, all_contours, cv::RETR_EXTERNAL,
                    cv::CHAIN_APPROX_NONE);
 
-  // Filter out small contours
-  const double MIN_CONTOUR_AREA = 20.0;  // Skip contours smaller than this
+  // Update contour tracker with new contours
+  contour_tracker_->update(all_contours);
+
+  // Get all tracked contours (not just stable ones for line detection)
+  const auto& all_tracked = contour_tracker_->get_tracked_contours();
+
+  // Log tracking information
+  if (!all_tracked.empty()) {
+    std::string tracking_info = "Tracking: ";
+    for (const auto& [id, tracked] : all_tracked) {
+      tracking_info += "ID" + std::to_string(id) +
+                       "(age:" + std::to_string(tracked.age) +
+                       ",miss:" + std::to_string(tracked.missed_frames) + ") ";
+    }
+    RCLCPP_DEBUG(node_->get_logger(), "%s", tracking_info.c_str());
+  }
+
+  // Convert tracked contours to vector for processing
+  // Filter by area here instead
+  const double MIN_CONTOUR_AREA = 20.0;
   std::vector<std::vector<cv::Point>> contours;
-  for (const auto& contour : all_contours) {
-    double area = cv::contourArea(contour);
-    if (area >= MIN_CONTOUR_AREA) {
-      contours.push_back(contour);
+  for (const auto& [id, tracked] : all_tracked) {
+    if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
+      contours.push_back(tracked.contour);
     }
   }
 
@@ -608,35 +657,23 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
   }
 
   // Draw contours if enabled (on top of mask if present)
-  if (show_contours_ && !last_black_mask_.empty()) {
-    // Use the stored black mask to find contours
-    cv::Mat mask_for_contours = last_black_mask_.clone();
+  if (show_contours_ && contour_tracker_) {
+    // Get all tracked contours
+    const auto& tracked = contour_tracker_->get_tracked_contours();
 
-    std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(mask_for_contours, contours, cv::RETR_EXTERNAL,
-                     cv::CHAIN_APPROX_NONE);
-
-    // Draw only valid contours (area >= 20)
-    const double MIN_CONTOUR_AREA = 20.0;
-    int valid_contour_idx = 0;
-    for (size_t i = 0; i < contours.size(); i++) {
-      double area = cv::contourArea(contours[i]);
-      if (area < MIN_CONTOUR_AREA) {
-        continue;
-      }
-
+    for (const auto& [id, tracked_contour] : tracked) {
       // Create offset contour for correct positioning
       std::vector<std::vector<cv::Point>> contour_to_draw;
       std::vector<cv::Point> offset_contour;
-      for (const auto& pt : contours[i]) {
+      for (const auto& pt : tracked_contour.contour) {
         offset_contour.push_back(
             cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
       }
       contour_to_draw.push_back(offset_contour);
 
-      // Use different colors for different valid contours
+      // Use consistent color based on ID
       cv::Scalar contour_color;
-      switch (valid_contour_idx % 6) {
+      switch (id % 6) {
         case 0:
           contour_color = cv::Scalar(255, 0, 0);
           break;  // Blue
@@ -658,7 +695,31 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
       }
 
       cv::drawContours(img, contour_to_draw, 0, contour_color, 2);
-      valid_contour_idx++;
+
+      // Draw ID and tracking info
+      cv::Point2f centroid_offset(tracked_contour.centroid.x + roi_rect.x,
+                                  tracked_contour.centroid.y + roi_rect.y);
+
+      // Draw centroid
+      cv::circle(img, centroid_offset, 4, contour_color, -1);
+
+      // Draw ID text
+      std::string text = "ID:" + std::to_string(id);
+      if (tracked_contour.age > 1) {
+        text += " (" + std::to_string(tracked_contour.age) + ")";
+      }
+      cv::putText(img, text,
+                  cv::Point(centroid_offset.x + 5, centroid_offset.y - 5),
+                  cv::FONT_HERSHEY_SIMPLEX, 0.4, contour_color, 1);
+
+      // Draw predicted position if missed
+      if (tracked_contour.missed_frames > 0) {
+        cv::Point2f pred_offset(
+            tracked_contour.predicted_centroid.x + roi_rect.x,
+            tracked_contour.predicted_centroid.y + roi_rect.y);
+        cv::circle(img, pred_offset, 3, contour_color, 1);
+        cv::line(img, centroid_offset, pred_offset, contour_color, 1);
+      }
     }
   }
 
