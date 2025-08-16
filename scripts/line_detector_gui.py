@@ -156,16 +156,24 @@ class LineDetectorParameterGUI:
                 "publish_image_with_lines": {"type": "bool", "default": True},
                 "show_edges": {"type": "bool", "default": False}
             },
-            "Pre-processing": {
+            "Black Line Detection": {
                 "roi_x": {"type": "int", "default": -1, "min": -1, "max": 1920},
                 "roi_y": {"type": "int", "default": -1, "min": -1, "max": 1080},
                 "roi_w": {"type": "int", "default": -1, "min": -1, "max": 1920},
-                "roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080}
-            },
-            "Black Line Detection": {
+                "roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080},
                 "hsv_upper_v": {"type": "int", "default": 80, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
-                "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10}
+                "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10},
+                "show_contours": {"type": "bool", "default": False}
+            },
+            "Line Tracking": {
+                "line_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
+                "min_line_width": {"type": "double", "default": 6.0, "min": 1.0, "max": 50.0},
+                "max_line_width": {"type": "double", "default": 50.0, "min": 10.0, "max": 200.0},
+                "line_width_importance": {"type": "double", "default": 2.0, "min": 1.0, "max": 5.0},
+                "min_contour_score": {"type": "double", "default": 10.0, "min": 1.0, "max": 50.0},
+                "min_segments_straight": {"type": "int", "default": 5, "min": 1, "max": 20},
+                "min_segments_curve": {"type": "int", "default": 3, "min": 1, "max": 20}
             },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
