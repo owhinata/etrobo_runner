@@ -15,8 +15,7 @@ class AdaptiveLineTracker::Impl {
   explicit Impl(rclcpp::Node* node);
   ~Impl() = default;
 
-  std::vector<AdaptiveLineTracker::TrackedLine> track_line(
-      const cv::Mat& black_mask, double total_processing_ms = -1.0);
+  AdaptiveLineTracker::DetectionResult track_line(const cv::Mat& black_mask);
   void reset();
   double get_confidence() const { return confidence_; }
   void set_config(const Config& config) { config_ = config; }
@@ -89,9 +88,9 @@ AdaptiveLineTracker::AdaptiveLineTracker(rclcpp::Node* node)
 
 AdaptiveLineTracker::~AdaptiveLineTracker() = default;
 
-std::vector<AdaptiveLineTracker::TrackedLine> AdaptiveLineTracker::track_line(
-    const cv::Mat& black_mask, double total_processing_ms) {
-  return pimpl->track_line(black_mask, total_processing_ms);
+AdaptiveLineTracker::DetectionResult AdaptiveLineTracker::track_line(
+    const cv::Mat& black_mask) {
+  return pimpl->track_line(black_mask);
 }
 
 void AdaptiveLineTracker::reset() { pimpl->reset(); }
@@ -116,18 +115,14 @@ void AdaptiveLineTracker::Impl::reset() {
   confidence_ = 0.0;
 }
 
-std::vector<AdaptiveLineTracker::TrackedLine>
-AdaptiveLineTracker::Impl::track_line(const cv::Mat& black_mask,
-                                      double total_processing_ms) {
+AdaptiveLineTracker::DetectionResult AdaptiveLineTracker::Impl::track_line(
+    const cv::Mat& black_mask) {
   tracked_points_.clear();
-  std::vector<AdaptiveLineTracker::TrackedLine> result;
+  AdaptiveLineTracker::DetectionResult result;
 
   if (black_mask.empty()) {
     return result;
   }
-
-  // Timing start
-  const auto t_start = std::chrono::steady_clock::now();
 
   // Step 1: Frame counter for debugging
   static int frame_count = 0;
@@ -155,68 +150,37 @@ AdaptiveLineTracker::Impl::track_line(const cv::Mat& black_mask,
       collect_and_score_contours(black_mask, contours, contour_segments);
 
   // Step 4: Build TrackedLine structures using scoring
-  result = build_tracked_lines(contour_segments, contour_scores, contours);
+  result.tracked_lines =
+      build_tracked_lines(contour_segments, contour_scores, contours);
 
-  // Step 5: Count statistics for logging
-  int total_scans = 0;
-  int successful_detections = 0;
-  std::vector<int> all_segment_counts;
+  // Step 5: Populate statistics for result
+  result.total_contours = all_contours.size();
+  result.valid_contours = contours.size();
+  result.total_scans = 0;
+  result.successful_detections = 0;
 
   // Count total scans and successful detections
   for (int y = black_mask.rows - 2; y > 0; y -= config_.scan_step) {
-    total_scans++;
+    result.total_scans++;
     auto segments = find_black_segments(black_mask, y);
     if (!segments.empty()) {
-      successful_detections++;
+      result.successful_detections++;
     }
   }
 
-  // Count segments per contour for logging
+  // Count segments per contour
   for (size_t i = 0; i < contours.size(); i++) {
     auto it = contour_segments.find(i);
     if (it != contour_segments.end()) {
-      all_segment_counts.push_back(it->second.size());
+      result.segment_counts.push_back(it->second.size());
     } else {
-      all_segment_counts.push_back(0);
+      result.segment_counts.push_back(0);
     }
   }
 
-  // Log summary every frame with timing
-  if (node_) {
-    // Calculate detection processing time
-    const auto t_end = std::chrono::steady_clock::now();
-    const double detection_ms =
-        std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
-            t_end - t_start)
-            .count();
-
-    // Build points string showing all contours with segments
-    std::string points_info = " [points:";
-    for (size_t i = 0; i < all_segment_counts.size(); i++) {
-      if (i > 0) points_info += ",";
-      points_info += std::to_string(all_segment_counts[i]);
-    }
-    points_info += "]";
-
-    // Include total processing time if provided
-    if (total_processing_ms >= 0) {
-      RCLCPP_INFO(
-          node_->get_logger(),
-          "Detection: %d/%d scans, %zu/%zu contours valid%s (total: %.2f ms)",
-          successful_detections, total_scans, contours.size(),
-          all_contours.size(), points_info.c_str(), total_processing_ms);
-    } else {
-      RCLCPP_INFO(node_->get_logger(),
-                  "Detection: %d/%d scans, %zu/%zu contours valid%s (%.2f ms)",
-                  successful_detections, total_scans, contours.size(),
-                  all_contours.size(), points_info.c_str(), detection_ms);
-    }
-  }
-
-  // Step 7: Return results
-  // Note: Keep tracked_points_ for backward compatibility if needed
+  // Step 6: Update internal tracked points for backward compatibility
   tracked_points_.clear();
-  for (const auto& line : result) {
+  for (const auto& line : result.tracked_lines) {
     for (const auto& pt : line.points) {
       tracked_points_.push_back(pt);
     }

@@ -347,19 +347,12 @@ void LineDetectorNode::Impl::image_callback(
 
   // Configure and track the black line (gray disk is already excluded by HSV
   // thresholding)
-  // Calculate current processing time to pass to tracker
-  const auto t_current = std::chrono::steady_clock::now();
-  const double current_ms =
-      std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(
-          t_current - t0)
-          .count();
-
   configure_line_tracker();
-  auto tracked_lines_rel = line_tracker_->track_line(black_mask, current_ms);
+  auto detection_result = line_tracker_->track_line(black_mask);
 
   // Convert from relative (mask) coordinates to absolute (image) coordinates
   std::vector<AdaptiveLineTracker::TrackedLine> tracked_lines;
-  for (const auto& line_rel : tracked_lines_rel) {
+  for (const auto& line_rel : detection_result.tracked_lines) {
     AdaptiveLineTracker::TrackedLine line_abs;
     line_abs.contour_id = line_rel.contour_id;
     line_abs.area = line_rel.area;
@@ -370,33 +363,47 @@ void LineDetectorNode::Impl::image_callback(
     tracked_lines.push_back(line_abs);
   }
 
-  // Frame counter for periodic logging (handled in tracker)
+  // Step 4: Log detection results
+  const auto t1 = std::chrono::steady_clock::now();
+  const double total_ms =
+      std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t1 -
+                                                                            t0)
+          .count();
 
-  // Step 4: Publish lines data
+  // Build points string
+  std::string points_info = " [points:";
+  for (size_t i = 0; i < detection_result.segment_counts.size(); i++) {
+    if (i > 0) points_info += ",";
+    points_info += std::to_string(detection_result.segment_counts[i]);
+  }
+  points_info += "]";
+
+  RCLCPP_INFO(node_->get_logger(),
+              "Detection: %d/%d scans, %d/%d contours valid%s in %.2f ms",
+              detection_result.successful_detections,
+              detection_result.total_scans, detection_result.valid_contours,
+              detection_result.total_contours, points_info.c_str(), total_ms);
+
+  // Step 5: Publish lines data
   publish_lines(tracked_lines);
 
-  // Step 5: Localization (if calibrated)
+  // Step 6: Localization (if calibrated)
   if (state_ == State::Localizing) {
     perform_localization(tracked_lines, landmark_pos, found);
   }
 
-  // Step 6: Visualization
+  // Step 7: Visualization
   if (publish_image_ && image_pub_) {
     publish_visualization(msg, original_img, black_mask, tracked_lines,
                           roi_rect, contours);
   }
 
-  // Step 8: Log timing
-  const auto t1 = std::chrono::steady_clock::now();
-  const double ms =
-      std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(t1 -
-                                                                            t0)
-          .count();
-
+  // Step 8: Additional logging for specific states
   if (state_ == State::Localizing && localization_valid_) {
     RCLCPP_INFO(node_->get_logger(),
                 "Robot pose: x=%.3f, y=%.3f, yaw=%.1f deg in %.2f ms",
-                last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_), ms);
+                last_robot_x_, last_robot_y_, rad2deg(last_robot_yaw_),
+                total_ms);
   } else if (state_ == State::Calibrating) {
     // Count total points for logging
     size_t total_points = 0;
@@ -405,7 +412,7 @@ void LineDetectorNode::Impl::image_callback(
     }
     RCLCPP_DEBUG(node_->get_logger(),
                  "Calibrating: %zu points tracked in %.2f ms", total_points,
-                 ms);
+                 total_ms);
   }
 }
 

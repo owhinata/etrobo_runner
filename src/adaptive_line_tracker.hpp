@@ -17,14 +17,22 @@ class AdaptiveLineTracker {
     TrackedLine(int id = -1, double a = 0.0) : contour_id(id), area(a) {}
   };
 
+  // Structure to hold detection results and statistics
+  struct DetectionResult {
+    std::vector<TrackedLine> tracked_lines;  // Detected lines
+    int total_scans;                         // Total scan lines processed
+    int successful_detections;               // Scans with detected segments
+    int total_contours;                      // Total contours found
+    int valid_contours;               // Valid contours (area >= threshold)
+    std::vector<int> segment_counts;  // Segment count per valid contour
+  };
+
   explicit AdaptiveLineTracker(rclcpp::Node* node = nullptr);
   ~AdaptiveLineTracker();
 
-  // Main tracking function (returns tracked lines per contour in mask's
-  // coordinate system) Optional total_processing_ms parameter to include in log
-  // output
-  std::vector<TrackedLine> track_line(const cv::Mat& black_mask,
-                                      double total_processing_ms = -1.0);
+  // Main tracking function (returns detection results with tracked lines
+  // and statistics in mask's coordinate system)
+  DetectionResult track_line(const cv::Mat& black_mask);
 
   // Reset the tracker
   void reset();
