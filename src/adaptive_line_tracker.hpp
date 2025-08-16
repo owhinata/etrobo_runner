@@ -41,12 +41,10 @@ class AdaptiveLineTracker {
 
   // Main processing method for line detection
   // Returns true if detection was successful
-  bool process_frame(const cv::Mat& img, const cv::Rect& roi,
-                     DetectionResult& result);
+  bool process_frame(const cv::Mat& img, DetectionResult& result);
 
   // Draw visualization overlay for image_with_lines output
-  void draw_visualization_overlay(cv::Mat& img, const DetectionResult& result,
-                                  const cv::Rect& roi) const;
+  void draw_visualization_overlay(cv::Mat& img) const;
 
   // Reset the tracker
   void reset();

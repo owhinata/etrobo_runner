@@ -27,23 +27,6 @@ using std::placeholders::_1;
 static inline double deg2rad(double deg) { return deg * CV_PI / 180.0; }
 static inline double rad2deg(double rad) { return rad * 180.0 / CV_PI; }
 
-// Helper function for ROI validation
-static cv::Rect valid_roi(const cv::Mat& img, const std::vector<int64_t>& roi) {
-  if (roi.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
-  int x = static_cast<int>(roi[0]);
-  int y = static_cast<int>(roi[1]);
-  int w = static_cast<int>(roi[2]);
-  int h = static_cast<int>(roi[3]);
-  if (x < 0 || y < 0 || w <= 0 || h <= 0) {
-    return cv::Rect(0, 0, img.cols, img.rows);
-  }
-  x = std::max(0, std::min(x, img.cols - 1));
-  y = std::max(0, std::min(y, img.rows - 1));
-  w = std::min(w, img.cols - x);
-  h = std::min(h, img.rows - y);
-  return cv::Rect(x, y, w, h);
-}
-
 // Implementation class
 class LineDetectorNode::Impl {
  public:
@@ -71,11 +54,8 @@ class LineDetectorNode::Impl {
   void perform_localization(
       const std::vector<AdaptiveLineTracker::TrackedLine>& tracked_lines,
       const cv::Point2d& landmark_pos, bool found);
-  void publish_visualization(
-      const sensor_msgs::msg::Image::ConstSharedPtr msg,
-      const cv::Mat& original_img,
-      const AdaptiveLineTracker::DetectionResult& detection_result,
-      const cv::Rect& roi_rect);
+  void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
+                             const cv::Mat& original_img);
 
   // Node reference
   LineDetectorNode* node_;
@@ -93,9 +73,6 @@ class LineDetectorNode::Impl {
   // Topics
   std::string image_topic_;
   std::string camera_info_topic_;
-
-  // Image preprocessing
-  std::vector<int64_t> roi_;
 
   // Visualization
   bool publish_image_;
@@ -165,10 +142,6 @@ void LineDetectorNode::Impl::declare_all_parameters() {
       node_->declare_parameter<std::string>("image_topic", "camera/image_raw");
   camera_info_topic_ = node_->declare_parameter<std::string>(
       "camera_info_topic", "camera/camera_info");
-
-  // Image preprocessing
-  roi_ = node_->declare_parameter<std::vector<int64_t>>("roi",
-                                                        std::vector<int64_t>{});
 
   // Visualization
   publish_image_ =
@@ -253,9 +226,7 @@ LineDetectorNode::Impl::on_parameters_set(
         image_pub_ = node_->create_publisher<sensor_msgs::msg::Image>(
             "image_with_lines", pub_qos);
       }
-    } else if (name == "roi")
-      roi_ = param.as_integer_array();
-    else if (name == "landmark_map_x")
+    } else if (name == "landmark_map_x")
       landmark_map_x_ = param.as_double();
     else if (name == "landmark_map_y")
       landmark_map_y_ = param.as_double();
@@ -303,8 +274,6 @@ void LineDetectorNode::Impl::image_callback(
   }
 
   cv::Mat original_img = cv_ptr->image;
-  cv::Rect roi_rect = valid_roi(original_img, roi_);
-  cv::Mat work_img = original_img(roi_rect).clone();
 
   // Step 2: Detect gray disk
   cv::Point2d landmark_pos;
@@ -323,7 +292,7 @@ void LineDetectorNode::Impl::image_callback(
 
   // Step 3: Line detection using adaptive tracker
   AdaptiveLineTracker::DetectionResult detection_result;
-  line_tracker_->process_frame(original_img, roi_rect, detection_result);
+  line_tracker_->process_frame(original_img, detection_result);
 
   // Convert tracked lines to absolute coordinates (already in absolute
   // coordinates)
@@ -361,7 +330,7 @@ void LineDetectorNode::Impl::image_callback(
 
   // Step 7: Visualization
   if (publish_image_ && image_pub_) {
-    publish_visualization(msg, original_img, detection_result, roi_rect);
+    publish_visualization(msg, original_img);
   }
 
   // Step 8: Additional logging for specific states
@@ -482,14 +451,11 @@ void LineDetectorNode::Impl::perform_localization(
 
 void LineDetectorNode::Impl::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
-    const cv::Mat& original_img,
-    const AdaptiveLineTracker::DetectionResult& detection_result,
-    const cv::Rect& roi_rect) {
+    const cv::Mat& original_img) {
   cv::Mat output_img = original_img.clone();
 
   // Delegate visualization to AdaptiveLineTracker
-  line_tracker_->draw_visualization_overlay(output_img, detection_result,
-                                            roi_rect);
+  line_tracker_->draw_visualization_overlay(output_img);
 
   // Draw calibration visualization
   if (state_ == State::Calibrating) {

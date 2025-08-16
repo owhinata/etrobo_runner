@@ -19,17 +19,32 @@ class AdaptiveLineTracker::Impl {
 
   void declare_parameters();
   bool try_update_parameter(const rclcpp::Parameter& param);
-  bool process_frame(const cv::Mat& img, const cv::Rect& roi,
+  bool process_frame(const cv::Mat& img,
                      AdaptiveLineTracker::DetectionResult& result);
-  void draw_visualization_overlay(
-      cv::Mat& img, const AdaptiveLineTracker::DetectionResult& result,
-      const cv::Rect& roi) const;
+  void draw_visualization_overlay(cv::Mat& img) const;
   void reset();
   double get_confidence() const { return confidence_; }
   void set_config(const Config& config) { config_ = config; }
   Config get_config() const { return config_; }
 
  private:
+  // Helper function for ROI validation
+  cv::Rect valid_roi(const cv::Mat& img) const {
+    if (roi_.size() != 4) return cv::Rect(0, 0, img.cols, img.rows);
+    int x = static_cast<int>(roi_[0]);
+    int y = static_cast<int>(roi_[1]);
+    int w = static_cast<int>(roi_[2]);
+    int h = static_cast<int>(roi_[3]);
+    if (x < 0 || y < 0 || w <= 0 || h <= 0) {
+      return cv::Rect(0, 0, img.cols, img.rows);
+    }
+    x = std::max(0, std::min(x, img.cols - 1));
+    y = std::max(0, std::min(y, img.rows - 1));
+    w = std::min(w, img.cols - x);
+    h = std::min(h, img.rows - y);
+    return cv::Rect(x, y, w, h);
+  }
+
   // Segment structure for black regions
   struct Segment {
     int start_x;
@@ -97,6 +112,12 @@ class AdaptiveLineTracker::Impl {
   int hsv_dilate_kernel_{3};
   int hsv_dilate_iter_{1};
   bool show_contours_{false};
+
+  // ROI for processing
+  std::vector<int64_t> roi_;
+
+  // Last detection result for visualization
+  AdaptiveLineTracker::DetectionResult last_result_;
 };
 
 // AdaptiveLineTracker
@@ -111,14 +132,13 @@ bool AdaptiveLineTracker::try_update_parameter(const rclcpp::Parameter& param) {
   return pimpl->try_update_parameter(param);
 }
 
-bool AdaptiveLineTracker::process_frame(const cv::Mat& img, const cv::Rect& roi,
+bool AdaptiveLineTracker::process_frame(const cv::Mat& img,
                                         DetectionResult& result) {
-  return pimpl->process_frame(img, roi, result);
+  return pimpl->process_frame(img, result);
 }
 
-void AdaptiveLineTracker::draw_visualization_overlay(
-    cv::Mat& img, const DetectionResult& result, const cv::Rect& roi) const {
-  pimpl->draw_visualization_overlay(img, result, roi);
+void AdaptiveLineTracker::draw_visualization_overlay(cv::Mat& img) const {
+  pimpl->draw_visualization_overlay(img);
 }
 
 void AdaptiveLineTracker::reset() { pimpl->reset(); }
@@ -140,9 +160,14 @@ AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {}
 void AdaptiveLineTracker::Impl::reset() {
   tracked_points_.clear();
   confidence_ = 0.0;
+  last_result_ = AdaptiveLineTracker::DetectionResult();
 }
 
 void AdaptiveLineTracker::Impl::declare_parameters() {
+  // Image preprocessing
+  roi_ = node_->declare_parameter<std::vector<int64_t>>("roi",
+                                                        std::vector<int64_t>{});
+
   // HSV mask parameters for black line detection
   hsv_upper_v_ = node_->declare_parameter<int>("hsv_upper_v", 100);
   hsv_dilate_kernel_ = node_->declare_parameter<int>("hsv_dilate_kernel", 3);
@@ -171,7 +196,10 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     const rclcpp::Parameter& param) {
   const std::string& name = param.get_name();
 
-  if (name == "hsv_upper_v") {
+  if (name == "roi") {
+    roi_ = param.as_integer_array();
+    return true;
+  } else if (name == "hsv_upper_v") {
     hsv_upper_v_ = param.as_int();
     return true;
   } else if (name == "hsv_dilate_kernel") {
@@ -210,8 +238,7 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
 }
 
 bool AdaptiveLineTracker::Impl::process_frame(
-    const cv::Mat& img, const cv::Rect& roi,
-    AdaptiveLineTracker::DetectionResult& result) {
+    const cv::Mat& img, AdaptiveLineTracker::DetectionResult& result) {
   tracked_points_.clear();
 
   // Clear result
@@ -222,12 +249,16 @@ bool AdaptiveLineTracker::Impl::process_frame(
   result.total_contours = 0;
   result.valid_contours = 0;
 
+  // Clear last result
+  last_result_ = AdaptiveLineTracker::DetectionResult();
+
   if (img.empty()) {
     return false;
   }
 
   // Step 1: Extract ROI and convert to black mask
-  cv::Mat work_img = img(roi).clone();
+  cv::Rect roi_rect = valid_roi(img);
+  cv::Mat work_img = img(roi_rect).clone();
   cv::Mat black_mask = extract_black_regions(work_img);
 
   if (black_mask.empty()) {
@@ -284,13 +315,24 @@ bool AdaptiveLineTracker::Impl::process_frame(
     }
   }
 
-  // Step 6: Update internal tracked points for backward compatibility
+  // Step 6: Convert points to absolute coordinates (add ROI offset)
+  for (auto& line : result.tracked_lines) {
+    for (auto& pt : line.points) {
+      pt.x += roi_rect.x;
+      pt.y += roi_rect.y;
+    }
+  }
+
+  // Step 7: Update internal tracked points for backward compatibility
   tracked_points_.clear();
   for (const auto& line : result.tracked_lines) {
     for (const auto& pt : line.points) {
       tracked_points_.push_back(pt);
     }
   }
+
+  // Store result for visualization
+  last_result_ = result;
 
   return !result.tracked_lines.empty();
 }
@@ -534,16 +576,15 @@ cv::Mat AdaptiveLineTracker::Impl::extract_black_regions(const cv::Mat& img) {
   return black_mask;
 }
 
-void AdaptiveLineTracker::Impl::draw_visualization_overlay(
-    cv::Mat& img, const AdaptiveLineTracker::DetectionResult& result,
-    const cv::Rect& roi) const {
+void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
   // Draw ROI rectangle
-  cv::rectangle(img, roi, cv::Scalar(255, 255, 0), 1);
+  cv::Rect roi_rect = valid_roi(img);
+  cv::rectangle(img, roi_rect, cv::Scalar(255, 255, 0), 1);
 
   // Draw contours if enabled
   if (show_contours_) {
     // Get contours from the current black mask
-    cv::Mat work_img = img(roi).clone();
+    cv::Mat work_img = img(roi_rect).clone();
     cv::Mat black_mask =
         const_cast<Impl*>(this)->extract_black_regions(work_img);
 
@@ -564,7 +605,8 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(
       std::vector<std::vector<cv::Point>> contour_to_draw;
       std::vector<cv::Point> offset_contour;
       for (const auto& pt : contours[i]) {
-        offset_contour.push_back(cv::Point(pt.x + roi.x, pt.y + roi.y));
+        offset_contour.push_back(
+            cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
       }
       contour_to_draw.push_back(offset_contour);
 
@@ -597,7 +639,7 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(
   }
 
   // Draw tracked points with different colors for different contours
-  for (const auto& line : result.tracked_lines) {
+  for (const auto& line : last_result_.tracked_lines) {
     // Use different colors for different contours
     cv::Scalar point_color;
     switch (line.contour_id % 6) {
@@ -622,9 +664,8 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(
     }
 
     for (const auto& pt : line.points) {
-      // Points need to be offset by ROI
-      cv::Point center(static_cast<int>(pt.x + roi.x),
-                       static_cast<int>(pt.y + roi.y));
+      // Points are already in absolute coordinates
+      cv::Point center(static_cast<int>(pt.x), static_cast<int>(pt.y));
       cv::circle(img, center, 3, point_color, -1);
     }
   }
