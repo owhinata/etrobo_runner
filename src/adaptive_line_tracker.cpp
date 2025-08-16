@@ -88,9 +88,10 @@ std::vector<cv::Point2d> AdaptiveLineTracker::Impl::track_line(
     return tracked_points_;
   }
 
-  // Step 1: Debug output (every 30 frames)
+  // Step 1: Debug output (every frame)
   static int frame_count = 0;
-  bool debug_this_frame = (frame_count++ % 30 == 0);
+  bool debug_this_frame = true;  // Debug every frame
+  frame_count++;
   if (debug_this_frame) {
     std::cout << "\n[TRACK DEBUG] Frame " << frame_count << std::endl;
     std::cout << "Image size: " << black_mask.cols << "x" << black_mask.rows
