@@ -76,7 +76,6 @@ class LineDetectorNode::Impl {
 
   // Visualization
   bool publish_image_;
-  bool show_edges_;
 
   // Localization parameters
   double landmark_map_x_;
@@ -146,7 +145,6 @@ void LineDetectorNode::Impl::declare_all_parameters() {
   // Visualization
   publish_image_ =
       node_->declare_parameter<bool>("publish_image_with_lines", false);
-  show_edges_ = node_->declare_parameter<bool>("show_edges", false);
 
   // Localization parameters
   landmark_map_x_ = node_->declare_parameter<double>("landmark_map_x", -0.409);
@@ -216,9 +214,7 @@ LineDetectorNode::Impl::on_parameters_set(
 
     const std::string& name = param.get_name();
     // Update processing parameters dynamically
-    if (name == "show_edges")
-      show_edges_ = param.as_bool();
-    else if (name == "publish_image_with_lines") {
+    if (name == "publish_image_with_lines") {
       publish_image_ = param.as_bool();
       if (publish_image_ && !image_pub_) {
         auto pub_qos = rclcpp::SensorDataQoS();

@@ -112,12 +112,16 @@ class AdaptiveLineTracker::Impl {
   int hsv_dilate_kernel_{3};
   int hsv_dilate_iter_{1};
   bool show_contours_{false};
+  bool show_mask_{false};
 
   // ROI for processing
   std::vector<int64_t> roi_;
 
   // Last detection result for visualization
   AdaptiveLineTracker::DetectionResult last_result_;
+
+  // Last black mask for visualization
+  cv::Mat last_black_mask_;
 };
 
 // AdaptiveLineTracker
@@ -175,6 +179,7 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
 
   // Visualization parameters
   show_contours_ = node_->declare_parameter<bool>("show_contours", false);
+  show_mask_ = node_->declare_parameter<bool>("show_mask", false);
 
   // Line tracking configuration parameters
   config_.scan_step = node_->declare_parameter<int>("line_scan_step", 5);
@@ -208,6 +213,9 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     return true;
   } else if (name == "show_contours") {
     show_contours_ = param.as_bool();
+    return true;
+  } else if (name == "show_mask") {
+    show_mask_ = param.as_bool();
     return true;
   } else if (name == "line_scan_step") {
     config_.scan_step = param.as_int();
@@ -254,7 +262,10 @@ bool AdaptiveLineTracker::Impl::process_frame(
   // Step 1: Extract ROI and convert to black mask
   cv::Rect roi_rect = valid_roi(img);
   cv::Mat work_img = img(roi_rect).clone();
-  cv::Mat black_mask = extract_black_regions(work_img);
+
+  // Extract black regions and store for visualization
+  last_black_mask_ = extract_black_regions(work_img);
+  cv::Mat& black_mask = last_black_mask_;
 
   if (black_mask.empty()) {
     return false;
@@ -576,15 +587,23 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
   cv::Rect roi_rect = valid_roi(img);
   cv::rectangle(img, roi_rect, cv::Scalar(255, 255, 0), 1);
 
-  // Draw contours if enabled
-  if (show_contours_) {
-    // Get contours from the current black mask
-    cv::Mat work_img = img(roi_rect).clone();
-    cv::Mat black_mask =
-        const_cast<Impl*>(this)->extract_black_regions(work_img);
+  // Use black mask as background if show_mask is enabled
+  if (show_mask_ && !last_black_mask_.empty()) {
+    // Convert grayscale mask to BGR
+    cv::Mat mask_bgr;
+    cv::cvtColor(last_black_mask_, mask_bgr, cv::COLOR_GRAY2BGR);
+
+    // Copy the mask to the ROI region as background
+    mask_bgr.copyTo(img(roi_rect));
+  }
+
+  // Draw contours if enabled (on top of mask if present)
+  if (show_contours_ && !last_black_mask_.empty()) {
+    // Use the stored black mask to find contours
+    cv::Mat mask_for_contours = last_black_mask_.clone();
 
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(black_mask, contours, cv::RETR_EXTERNAL,
+    cv::findContours(mask_for_contours, contours, cv::RETR_EXTERNAL,
                      cv::CHAIN_APPROX_NONE);
 
     // Draw only valid contours (area >= 20)

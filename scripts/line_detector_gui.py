@@ -153,8 +153,7 @@ class LineDetectorParameterGUI:
         self.parameter_definitions = {
             "I/O Settings": {
                 "image_topic": {"type": "string", "default": "camera/image_raw"},
-                "publish_image_with_lines": {"type": "bool", "default": True},
-                "show_edges": {"type": "bool", "default": False}
+                "publish_image_with_lines": {"type": "bool", "default": True}
             },
             "Black Line Detection": {
                 "roi_x": {"type": "int", "default": -1, "min": -1, "max": 1920},
@@ -164,6 +163,7 @@ class LineDetectorParameterGUI:
                 "hsv_upper_v": {"type": "int", "default": 80, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
                 "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10},
+                "show_mask": {"type": "bool", "default": False},
                 "show_contours": {"type": "bool", "default": False}
             },
             "Line Tracking": {
