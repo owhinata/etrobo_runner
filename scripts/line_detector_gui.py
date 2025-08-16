@@ -169,7 +169,6 @@ class LineDetectorParameterGUI:
             "Line Tracking": {
                 "line_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
                 "min_line_width": {"type": "double", "default": 6.0, "min": 1.0, "max": 50.0},
-                "max_line_width": {"type": "double", "default": 50.0, "min": 10.0, "max": 200.0},
                 "line_width_importance": {"type": "double", "default": 2.0, "min": 1.0, "max": 5.0},
                 "min_contour_score": {"type": "double", "default": 10.0, "min": 1.0, "max": 50.0},
                 "min_segments_straight": {"type": "int", "default": 5, "min": 1, "max": 20},

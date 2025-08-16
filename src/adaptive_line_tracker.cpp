@@ -180,8 +180,6 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   config_.scan_step = node_->declare_parameter<int>("line_scan_step", 5);
   config_.min_line_width =
       node_->declare_parameter<double>("min_line_width", 6.0);
-  config_.max_line_width =
-      node_->declare_parameter<double>("max_line_width", 50.0);
   config_.width_importance =
       node_->declare_parameter<double>("line_width_importance", 2.0);
   config_.min_contour_score =
@@ -216,9 +214,6 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     return true;
   } else if (name == "min_line_width") {
     config_.min_line_width = param.as_double();
-    return true;
-  } else if (name == "max_line_width") {
-    config_.max_line_width = param.as_double();
     return true;
   } else if (name == "line_width_importance") {
     config_.width_importance = param.as_double();
