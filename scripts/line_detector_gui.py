@@ -160,6 +160,8 @@ class LineDetectorParameterGUI:
                 "roi_y": {"type": "int", "default": -1, "min": -1, "max": 1080},
                 "roi_w": {"type": "int", "default": -1, "min": -1, "max": 1920},
                 "roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080},
+                "hsv_lower_s": {"type": "int", "default": 0, "min": 0, "max": 255},
+                "hsv_upper_s": {"type": "int", "default": 255, "min": 0, "max": 255},
                 "hsv_upper_v": {"type": "int", "default": 80, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
                 "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10},

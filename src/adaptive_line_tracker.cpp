@@ -108,6 +108,8 @@ class AdaptiveLineTracker::Impl {
   Config config_;  // Already has default values in struct definition
 
   // HSV parameters for black line detection
+  int hsv_lower_s_{0};
+  int hsv_upper_s_{255};
   int hsv_upper_v_{100};
   int hsv_dilate_kernel_{3};
   int hsv_dilate_iter_{1};
@@ -173,6 +175,8 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
                                                         std::vector<int64_t>{});
 
   // HSV mask parameters for black line detection
+  hsv_lower_s_ = node_->declare_parameter<int>("hsv_lower_s", 0);
+  hsv_upper_s_ = node_->declare_parameter<int>("hsv_upper_s", 255);
   hsv_upper_v_ = node_->declare_parameter<int>("hsv_upper_v", 100);
   hsv_dilate_kernel_ = node_->declare_parameter<int>("hsv_dilate_kernel", 3);
   hsv_dilate_iter_ = node_->declare_parameter<int>("hsv_dilate_iter", 1);
@@ -201,6 +205,12 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
 
   if (name == "roi") {
     roi_ = param.as_integer_array();
+    return true;
+  } else if (name == "hsv_lower_s") {
+    hsv_lower_s_ = param.as_int();
+    return true;
+  } else if (name == "hsv_upper_s") {
+    hsv_upper_s_ = param.as_int();
     return true;
   } else if (name == "hsv_upper_v") {
     hsv_upper_v_ = param.as_int();
@@ -560,9 +570,9 @@ cv::Mat AdaptiveLineTracker::Impl::extract_black_regions(const cv::Mat& img) {
     cv::merge(channels, 3, hsv);
   }
 
-  // Extract black regions (low V value)
-  cv::inRange(hsv, cv::Scalar(0, 0, 0), cv::Scalar(180, 255, hsv_upper_v_),
-              black_mask);
+  // Extract black regions (low V value, within S range)
+  cv::inRange(hsv, cv::Scalar(0, hsv_lower_s_, 0),
+              cv::Scalar(180, hsv_upper_s_, hsv_upper_v_), black_mask);
 
   // Apply morphological operations to clean up
   if (hsv_dilate_iter_ > 0 && hsv_dilate_kernel_ > 0) {
