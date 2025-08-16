@@ -443,8 +443,9 @@ void LineDetectorNode::Impl::configure_line_tracker() {
 
   // Configure tracker (can be made dynamic via parameters in the future)
   AdaptiveLineTracker::Config config;
-  config.max_line_width = 80.0;    // Reduced: black line shouldn't be too wide
-  config.min_line_width = 10.0;    // Increased: filter out thin noise
+  config.max_line_width =
+      50.0;  // Strict: black line should be 20-40 pixels typically
+  config.min_line_width = 15.0;    // Increased: filter out thin noise
   config.max_lateral_jump = 20.0;  // Reduced: line shouldn't jump too much
   config.scan_step = 5;
   config.position_weight = 0.5;  // Increase weight for position continuity

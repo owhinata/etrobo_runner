@@ -26,7 +26,6 @@ class AdaptiveLineTracker {
     double max_lateral_jump =
         30.0;                      // Maximum allowed lateral jump between scans
     int scan_step = 5;             // Vertical step between scan lines
-    int smooth_window = 3;         // Window size for trajectory smoothing
     double width_weight = 0.2;     // Weight for width change in scoring
     double position_weight = 0.3;  // Weight for position change in scoring
     double prediction_weight = 0.5;  // Weight for prediction error in scoring
