@@ -73,10 +73,11 @@ class LineDetectorNode::Impl {
   void publish_lines(const std::vector<cv::Point2d>& tracked_points);
   void perform_localization(const std::vector<cv::Point2d>& tracked_points,
                             const cv::Point2d& landmark_pos, bool found);
-  void publish_visualization(const sensor_msgs::msg::Image::ConstSharedPtr msg,
-                             const cv::Mat& original_img, const cv::Mat& edges,
-                             const std::vector<cv::Point2d>& tracked_points,
-                             const cv::Rect& roi_rect);
+  void publish_visualization(
+      const sensor_msgs::msg::Image::ConstSharedPtr msg,
+      const cv::Mat& original_img, const cv::Mat& edges,
+      const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect,
+      const std::vector<std::vector<cv::Point>>& contours);
 
   // Node reference
   LineDetectorNode* node_;
@@ -339,6 +340,12 @@ void LineDetectorNode::Impl::image_callback(
   // Extract black regions only from ROI area (work_img is already ROI-cropped)
   cv::Mat black_mask = extract_black_regions(work_img);
 
+  // Find contours for visualization
+  std::vector<std::vector<cv::Point>> contours;
+  cv::Mat mask_for_contours = black_mask.clone();
+  cv::findContours(mask_for_contours, contours, cv::RETR_EXTERNAL,
+                   cv::CHAIN_APPROX_NONE);
+
   // Configure and track the black line (gray disk is already excluded by HSV
   // thresholding)
   configure_line_tracker();
@@ -371,7 +378,7 @@ void LineDetectorNode::Impl::image_callback(
   // Step 6: Visualization
   if (publish_image_ && image_pub_) {
     publish_visualization(msg, original_img, black_mask, tracked_points,
-                          roi_rect);
+                          roi_rect, contours);
   }
 
   // Step 8: Log timing
@@ -539,7 +546,8 @@ void LineDetectorNode::Impl::perform_localization(
 void LineDetectorNode::Impl::publish_visualization(
     const sensor_msgs::msg::Image::ConstSharedPtr msg,
     const cv::Mat& original_img, const cv::Mat& edges,
-    const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect) {
+    const std::vector<cv::Point2d>& tracked_points, const cv::Rect& roi_rect,
+    const std::vector<std::vector<cv::Point>>& contours) {
   cv::Mat output_img;
   if (show_edges_) {
     cv::cvtColor(edges, output_img, cv::COLOR_GRAY2BGR);
@@ -549,6 +557,43 @@ void LineDetectorNode::Impl::publish_visualization(
 
   // Draw ROI rectangle
   cv::rectangle(output_img, roi_rect, cv::Scalar(255, 255, 0), 1);
+
+  // Draw contours (offset by ROI position)
+  for (size_t i = 0; i < contours.size(); i++) {
+    // Create offset contour for correct positioning
+    std::vector<std::vector<cv::Point>> contour_to_draw;
+    std::vector<cv::Point> offset_contour;
+    for (const auto& pt : contours[i]) {
+      offset_contour.push_back(cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
+    }
+    contour_to_draw.push_back(offset_contour);
+
+    // Use different colors for different contours
+    cv::Scalar contour_color;
+    switch (i % 6) {
+      case 0:
+        contour_color = cv::Scalar(255, 0, 0);
+        break;  // Blue
+      case 1:
+        contour_color = cv::Scalar(0, 255, 255);
+        break;  // Yellow
+      case 2:
+        contour_color = cv::Scalar(255, 0, 255);
+        break;  // Magenta
+      case 3:
+        contour_color = cv::Scalar(0, 255, 128);
+        break;  // Green-yellow
+      case 4:
+        contour_color = cv::Scalar(255, 128, 0);
+        break;  // Orange
+      case 5:
+        contour_color = cv::Scalar(128, 0, 255);
+        break;  // Purple
+    }
+
+    // Draw contour outline (thicker line for better visibility)
+    cv::drawContours(output_img, contour_to_draw, 0, contour_color, 2);
+  }
 
   // Draw tracked points (fixed green color, radius 3)
   const cv::Scalar point_color(0, 255, 0);  // Green in BGR
