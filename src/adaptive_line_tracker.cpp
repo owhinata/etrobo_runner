@@ -75,11 +75,6 @@ class AdaptiveLineTracker::Impl {
   int find_segment_contour(const std::vector<std::vector<cv::Point>>& contours,
                            const Segment& seg, int y);
 
-  // Check if two segments belong to the same contour
-  bool are_segments_in_same_contour(
-      const std::vector<std::vector<cv::Point>>& contours, const Segment& seg1,
-      int y1, const Segment& seg2, int y2);
-
   // Calculate score for a segment based on width and position
   double calculate_segment_score(const Segment& seg, int y, int image_height,
                                  int image_width);
@@ -102,9 +97,19 @@ class AdaptiveLineTracker::Impl {
   // Extract black and colored regions from image using HSV thresholding
   cv::Mat extract_line_regions(const cv::Mat& img);
 
+  // Process contours: find, track, and filter
+  std::vector<std::vector<cv::Point>> process_contours(const cv::Mat& mask);
+
+  // Build final detection result from scored contours
+  void build_detection_result(
+      const std::vector<std::vector<cv::Point>>& contours,
+      const std::map<int, std::vector<SegmentInfo>>& contour_segments,
+      const std::map<int, ContourScore>& contour_scores,
+      const cv::Mat& black_mask, const cv::Rect& roi_rect,
+      AdaptiveLineTracker::DetectionResult& result);
+
   // Member variables
   LineDetectorNode* node_;  // Node pointer for parameters and logging
-  std::vector<cv::Point2d> tracked_points_;
   double confidence_{0.0};
   Config config_;  // Already has default values in struct definition
 
@@ -189,7 +194,6 @@ AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {
 }
 
 void AdaptiveLineTracker::Impl::reset() {
-  tracked_points_.clear();
   confidence_ = 0.0;
   last_result_ = AdaptiveLineTracker::DetectionResult();
 }
@@ -384,9 +388,7 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
 
 bool AdaptiveLineTracker::Impl::process_frame(
     const cv::Mat& img, AdaptiveLineTracker::DetectionResult& result) {
-  tracked_points_.clear();
-
-  // Clear result and last result
+  // Initialize
   result = AdaptiveLineTracker::DetectionResult();
   last_result_ = AdaptiveLineTracker::DetectionResult();
 
@@ -394,116 +396,27 @@ bool AdaptiveLineTracker::Impl::process_frame(
     return false;
   }
 
-  // Step 1: Extract ROI and convert to black mask
+  // Step 1: Extract ROI and line regions
   cv::Rect roi_rect = valid_roi(img);
   cv::Mat work_img = img(roi_rect).clone();
-
-  // Extract line regions (black and blue) and store for visualization
   last_black_mask_ = extract_line_regions(work_img);
-  cv::Mat& black_mask =
-      last_black_mask_;  // Keep variable name for compatibility
 
-  if (black_mask.empty()) {
+  if (last_black_mask_.empty()) {
     return false;
   }
 
-  // Step 2: Find contours in the mask for connectivity checking
-  std::vector<std::vector<cv::Point>> all_contours;
-  cv::Mat mask_copy = black_mask.clone();  // findContours modifies the input
-  cv::findContours(mask_copy, all_contours, cv::RETR_EXTERNAL,
-                   cv::CHAIN_APPROX_NONE);
-
-  // Update contour tracker with new contours
-  contour_tracker_->update(all_contours);
-
-  // Get all tracked contours (not just stable ones for line detection)
-  const auto& all_tracked = contour_tracker_->get_tracked_contours();
-
-  // Log tracking information
-  if (!all_tracked.empty()) {
-    std::string tracking_info = "Tracking: ";
-    for (const auto& [id, tracked] : all_tracked) {
-      tracking_info += "ID" + std::to_string(id) +
-                       "(age:" + std::to_string(tracked.age) +
-                       ",miss:" + std::to_string(tracked.missed_frames) + ") ";
-    }
-    RCLCPP_DEBUG(node_->get_logger(), "%s", tracking_info.c_str());
-  }
-
-  // Filter tracked contours by area and missed frames
-  std::vector<std::vector<cv::Point>> contours;
-  constexpr double MIN_CONTOUR_AREA = 20.0;
-  contours.reserve(all_tracked.size());
-  for (const auto& [id, tracked] : all_tracked) {
-    if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
-      contours.push_back(tracked.contour);
-    }
-  }
+  // Step 2: Process contours (find, track, and filter)
+  std::vector<std::vector<cv::Point>> contours =
+      process_contours(last_black_mask_);
 
   // Step 3: Collect segments and calculate scores for each contour
   std::map<int, std::vector<SegmentInfo>> contour_segments;
   auto contour_scores =
-      collect_and_score_contours(black_mask, contours, contour_segments);
+      collect_and_score_contours(last_black_mask_, contours, contour_segments);
 
-  // Find the highest scoring contour
-  result.best_contour_id = -1;
-  result.best_contour_score = 0.0;
-  result.best_contour.clear();
-
-  for (const auto& [contour_id, score] : contour_scores) {
-    if (score.weighted_score > result.best_contour_score) {
-      result.best_contour_score = score.weighted_score;
-      result.best_contour_id = contour_id;
-      if (contour_id >= 0 && contour_id < static_cast<int>(contours.size())) {
-        result.best_contour = contours[contour_id];
-      }
-    }
-  }
-
-  // Step 4: Build TrackedLine structures using scoring
-  result.tracked_lines =
-      build_tracked_lines(contour_segments, contour_scores, contours);
-
-  // Step 5: Populate statistics for result
-  result.total_contours = all_contours.size();
-  result.valid_contours = contours.size();
-  result.total_scans = 0;
-  result.successful_detections = 0;
-
-  // Count total scans and successful detections
-  for (int y = black_mask.rows - 2; y > 0; y -= config_.scan_step) {
-    result.total_scans++;
-    auto segments = find_black_segments(black_mask, y);
-    if (!segments.empty()) {
-      result.successful_detections++;
-    }
-  }
-
-  // Count segments per contour
-  for (size_t i = 0; i < contours.size(); i++) {
-    auto it = contour_segments.find(i);
-    if (it != contour_segments.end()) {
-      result.segment_counts.push_back(it->second.size());
-    } else {
-      result.segment_counts.push_back(0);
-    }
-  }
-
-  // Step 6: Convert points to absolute coordinates (add ROI offset)
-  for (auto& line : result.tracked_lines) {
-    for (auto& pt : line.points) {
-      pt.x += roi_rect.x;
-      pt.y += roi_rect.y;
-    }
-  }
-
-  // Step 7: Update internal tracked points for backward compatibility
-  tracked_points_.clear();
-  for (const auto& line : result.tracked_lines) {
-    for (const auto& pt : line.points) {
-      tracked_points_.push_back(pt);
-    }
-  }
+  // Step 4: Build final detection result
+  build_detection_result(contours, contour_segments, contour_scores,
+                         last_black_mask_, roi_rect, result);
 
   // Store result for visualization
   last_result_ = result;
@@ -581,16 +494,6 @@ int AdaptiveLineTracker::Impl::find_segment_contour(
   }
 
   return -1;  // No contour found
-}
-
-bool AdaptiveLineTracker::Impl::are_segments_in_same_contour(
-    const std::vector<std::vector<cv::Point>>& contours, const Segment& seg1,
-    int y1, const Segment& seg2, int y2) {
-  int contour1 = find_segment_contour(contours, seg1, y1);
-  int contour2 = find_segment_contour(contours, seg2, y2);
-
-  // Both segments must belong to the same valid contour
-  return (contour1 >= 0 && contour1 == contour2);
 }
 
 double AdaptiveLineTracker::Impl::calculate_segment_score(const Segment& seg,
@@ -710,6 +613,108 @@ AdaptiveLineTracker::Impl::build_tracked_lines(
   }
 
   return result;
+}
+
+std::vector<std::vector<cv::Point>> AdaptiveLineTracker::Impl::process_contours(
+    const cv::Mat& mask) {
+  // Find contours in the mask
+  std::vector<std::vector<cv::Point>> all_contours;
+  cv::Mat mask_copy = mask.clone();  // findContours modifies the input
+  cv::findContours(mask_copy, all_contours, cv::RETR_EXTERNAL,
+                   cv::CHAIN_APPROX_NONE);
+
+  // Update contour tracker with new contours
+  contour_tracker_->update(all_contours);
+
+  // Get all tracked contours
+  const auto& all_tracked = contour_tracker_->get_tracked_contours();
+
+  // Log tracking information if debug enabled
+  if (!all_tracked.empty()) {
+    std::string tracking_info = "Tracking: ";
+    for (const auto& [id, tracked] : all_tracked) {
+      tracking_info += "ID" + std::to_string(id) +
+                       "(age:" + std::to_string(tracked.age) +
+                       ",miss:" + std::to_string(tracked.missed_frames) + ") ";
+    }
+    RCLCPP_DEBUG(node_->get_logger(), "%s", tracking_info.c_str());
+  }
+
+  // Filter tracked contours by area and missed frames
+  std::vector<std::vector<cv::Point>> filtered_contours;
+  constexpr double MIN_CONTOUR_AREA = 20.0;
+  filtered_contours.reserve(all_tracked.size());
+
+  for (const auto& [id, tracked] : all_tracked) {
+    if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
+      filtered_contours.push_back(tracked.contour);
+    }
+  }
+
+  return filtered_contours;
+}
+
+void AdaptiveLineTracker::Impl::build_detection_result(
+    const std::vector<std::vector<cv::Point>>& contours,
+    const std::map<int, std::vector<SegmentInfo>>& contour_segments,
+    const std::map<int, ContourScore>& contour_scores,
+    const cv::Mat& black_mask, const cv::Rect& roi_rect,
+    AdaptiveLineTracker::DetectionResult& result) {
+  // Find the highest scoring contour
+  result.best_contour_id = -1;
+  result.best_contour_score = 0.0;
+  result.best_contour.clear();
+
+  for (const auto& [contour_id, score] : contour_scores) {
+    if (score.weighted_score > result.best_contour_score) {
+      result.best_contour_score = score.weighted_score;
+      result.best_contour_id = contour_id;
+      if (contour_id >= 0 && contour_id < static_cast<int>(contours.size())) {
+        result.best_contour = contours[contour_id];
+      }
+    }
+  }
+
+  // Build TrackedLine structures using scoring
+  result.tracked_lines =
+      build_tracked_lines(contour_segments, contour_scores, contours);
+
+  // Populate statistics for result
+  // Note: We need to access all_contours which was local to process_contours
+  // For now, use contours size as an approximation
+  result.total_contours = contours.size();
+  result.valid_contours = contours.size();
+  result.total_scans = 0;
+  result.successful_detections = 0;
+
+  // Count total scans and successful detections
+  for (int y = black_mask.rows - 2; y > 0; y -= config_.scan_step) {
+    result.total_scans++;
+    auto segments = find_black_segments(black_mask, y);
+    if (!segments.empty()) {
+      result.successful_detections++;
+    }
+  }
+
+  // Count segments per contour
+  result.segment_counts.clear();
+  result.segment_counts.reserve(contours.size());
+  for (size_t i = 0; i < contours.size(); i++) {
+    auto it = contour_segments.find(i);
+    if (it != contour_segments.end()) {
+      result.segment_counts.push_back(it->second.size());
+    } else {
+      result.segment_counts.push_back(0);
+    }
+  }
+
+  // Convert points to absolute coordinates (add ROI offset)
+  for (auto& line : result.tracked_lines) {
+    for (auto& pt : line.points) {
+      pt.x += roi_rect.x;
+      pt.y += roi_rect.y;
+    }
+  }
 }
 
 cv::Mat AdaptiveLineTracker::Impl::extract_line_regions(const cv::Mat& img) {
