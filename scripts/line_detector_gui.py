@@ -168,6 +168,15 @@ class LineDetectorParameterGUI:
                 "show_mask": {"type": "bool", "default": False},
                 "show_contours": {"type": "bool", "default": False}
             },
+            "Blue Line Detection": {
+                "blue_detection_enabled": {"type": "bool", "default": True},
+                "blue_lower_h": {"type": "int", "default": 100, "min": 0, "max": 180},
+                "blue_upper_h": {"type": "int", "default": 130, "min": 0, "max": 180},
+                "blue_lower_s": {"type": "int", "default": 50, "min": 0, "max": 255},
+                "blue_upper_s": {"type": "int", "default": 255, "min": 0, "max": 255},
+                "blue_lower_v": {"type": "int", "default": 50, "min": 0, "max": 255},
+                "blue_upper_v": {"type": "int", "default": 255, "min": 0, "max": 255}
+            },
             "Line Tracking": {
                 "line_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
                 "min_line_width": {"type": "double", "default": 6.0, "min": 1.0, "max": 50.0},

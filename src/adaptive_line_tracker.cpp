@@ -99,8 +99,8 @@ class AdaptiveLineTracker::Impl {
       const std::map<int, ContourScore>& contour_scores,
       const std::vector<std::vector<cv::Point>>& contours);
 
-  // Extract black regions from image using HSV thresholding
-  cv::Mat extract_black_regions(const cv::Mat& img);
+  // Extract black and colored regions from image using HSV thresholding
+  cv::Mat extract_line_regions(const cv::Mat& img);
 
   // Member variables
   LineDetectorNode* node_;  // Node pointer for parameters and logging
@@ -116,6 +116,15 @@ class AdaptiveLineTracker::Impl {
   int hsv_dilate_iter_{1};
   bool show_contours_{false};
   bool show_mask_{false};
+
+  // HSV parameters for blue line detection
+  bool blue_detection_enabled_{true};
+  int blue_lower_h_{100};  // Blue hue range: 100-130
+  int blue_upper_h_{130};
+  int blue_lower_s_{50};  // Minimum saturation for blue
+  int blue_upper_s_{255};
+  int blue_lower_v_{50};  // Minimum value for blue
+  int blue_upper_v_{255};
 
   // ROI for processing
   std::vector<int64_t> roi_;
@@ -194,6 +203,16 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   // Visualization parameters
   show_contours_ = node_->declare_parameter<bool>("show_contours", false);
   show_mask_ = node_->declare_parameter<bool>("show_mask", false);
+
+  // Blue line detection parameters
+  blue_detection_enabled_ =
+      node_->declare_parameter<bool>("blue_detection_enabled", true);
+  blue_lower_h_ = node_->declare_parameter<int>("blue_lower_h", 100);
+  blue_upper_h_ = node_->declare_parameter<int>("blue_upper_h", 130);
+  blue_lower_s_ = node_->declare_parameter<int>("blue_lower_s", 50);
+  blue_upper_s_ = node_->declare_parameter<int>("blue_upper_s", 255);
+  blue_lower_v_ = node_->declare_parameter<int>("blue_lower_v", 50);
+  blue_upper_v_ = node_->declare_parameter<int>("blue_upper_v", 255);
 
   // Tracking parameters
   bool tracker_enabled =
@@ -281,6 +300,27 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
   } else if (name == "min_segments_curve") {
     config_.min_segments_curve = param.as_int();
     return true;
+  } else if (name == "blue_detection_enabled") {
+    blue_detection_enabled_ = param.as_bool();
+    return true;
+  } else if (name == "blue_lower_h") {
+    blue_lower_h_ = param.as_int();
+    return true;
+  } else if (name == "blue_upper_h") {
+    blue_upper_h_ = param.as_int();
+    return true;
+  } else if (name == "blue_lower_s") {
+    blue_lower_s_ = param.as_int();
+    return true;
+  } else if (name == "blue_upper_s") {
+    blue_upper_s_ = param.as_int();
+    return true;
+  } else if (name == "blue_lower_v") {
+    blue_lower_v_ = param.as_int();
+    return true;
+  } else if (name == "blue_upper_v") {
+    blue_upper_v_ = param.as_int();
+    return true;
   }
 
   // Tracker parameter updates
@@ -330,9 +370,10 @@ bool AdaptiveLineTracker::Impl::process_frame(
   cv::Rect roi_rect = valid_roi(img);
   cv::Mat work_img = img(roi_rect).clone();
 
-  // Extract black regions and store for visualization
-  last_black_mask_ = extract_black_regions(work_img);
-  cv::Mat& black_mask = last_black_mask_;
+  // Extract line regions (black and blue) and store for visualization
+  last_black_mask_ = extract_line_regions(work_img);
+  cv::Mat& black_mask =
+      last_black_mask_;  // Keep variable name for compatibility
 
   if (black_mask.empty()) {
     return false;
@@ -628,8 +669,8 @@ AdaptiveLineTracker::Impl::build_tracked_lines(
   return result;
 }
 
-cv::Mat AdaptiveLineTracker::Impl::extract_black_regions(const cv::Mat& img) {
-  cv::Mat black_mask;
+cv::Mat AdaptiveLineTracker::Impl::extract_line_regions(const cv::Mat& img) {
+  cv::Mat combined_mask;
 
   // Convert to HSV if needed
   cv::Mat hsv;
@@ -645,8 +686,22 @@ cv::Mat AdaptiveLineTracker::Impl::extract_black_regions(const cv::Mat& img) {
   }
 
   // Extract black regions (low V value, within S range)
+  cv::Mat black_mask;
   cv::inRange(hsv, cv::Scalar(0, hsv_lower_s_, 0),
               cv::Scalar(180, hsv_upper_s_, hsv_upper_v_), black_mask);
+
+  // Extract blue regions if enabled
+  if (blue_detection_enabled_) {
+    cv::Mat blue_mask;
+    cv::inRange(hsv, cv::Scalar(blue_lower_h_, blue_lower_s_, blue_lower_v_),
+                cv::Scalar(blue_upper_h_, blue_upper_s_, blue_upper_v_),
+                blue_mask);
+
+    // Combine black and blue masks
+    cv::bitwise_or(black_mask, blue_mask, combined_mask);
+  } else {
+    combined_mask = black_mask.clone();
+  }
 
   // Apply morphological operations to clean up
   if (hsv_dilate_iter_ > 0 && hsv_dilate_kernel_ > 0) {
@@ -654,16 +709,16 @@ cv::Mat AdaptiveLineTracker::Impl::extract_black_regions(const cv::Mat& img) {
         cv::MORPH_RECT, cv::Size(hsv_dilate_kernel_, hsv_dilate_kernel_));
 
     // Remove small noise first
-    cv::morphologyEx(black_mask, black_mask, cv::MORPH_OPEN, kernel);
+    cv::morphologyEx(combined_mask, combined_mask, cv::MORPH_OPEN, kernel);
 
     // Then close small gaps in the line
-    cv::morphologyEx(black_mask, black_mask, cv::MORPH_CLOSE, kernel);
+    cv::morphologyEx(combined_mask, combined_mask, cv::MORPH_CLOSE, kernel);
 
     // Additional erosion to remove edge noise
-    cv::erode(black_mask, black_mask, kernel, cv::Point(-1, -1), 1);
+    cv::erode(combined_mask, combined_mask, kernel, cv::Point(-1, -1), 1);
   }
 
-  return black_mask;
+  return combined_mask;
 }
 
 void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
