@@ -4,6 +4,8 @@ Line Detector Parameter Tuning GUI
 
 A GUI tool for real-time parameter tuning of the etrobo_line_detector node.
 Displays the image_with_lines topic and allows interactive parameter adjustment.
+
+Updated to work with AdaptiveLineTracker - removed edge detection parameters.
 """
 
 import tkinter as tk
@@ -53,8 +55,8 @@ class LineDetectorParameterGUI:
         self.update_thread.start()
 
         # Fetch initial parameters from node (after GUI is setup)
-        # Delay to ensure ROS is ready
-        self.root.after(2000, self.fetch_initial_parameters)
+        # Delay to ensure ROS is ready and node is running
+        self.root.after(3000, self.fetch_initial_parameters)
 
     def setup_gui(self):
         """Setup the main GUI layout"""
@@ -150,46 +152,61 @@ class LineDetectorParameterGUI:
         # Parameter definitions organized by category
         self.parameter_definitions = {
             "I/O Settings": {
-                "image_topic": {"type": "string", "default": "image"},
-                "publish_image_with_lines": {"type": "bool", "default": False},
-                "show_edges": {"type": "bool", "default": False}
+                "image_topic": {"type": "string", "default": "camera/image_raw"},
+                "publish_image_with_lines": {"type": "bool", "default": True}
             },
-            "Pre-processing": {
-                "blur_ksize": {"type": "int", "default": 5, "min": 1, "max": 21, "step": 2},
-                "blur_sigma": {"type": "double", "default": 1.5, "min": 0.1, "max": 5.0},
-
-                "roi_x": {"type": "int", "default": -1, "min": -1, "max": 1920},
-                "roi_y": {"type": "int", "default": -1, "min": -1, "max": 1080},
-                "roi_w": {"type": "int", "default": -1, "min": -1, "max": 1920},
-                "roi_h": {"type": "int", "default": -1, "min": -1, "max": 1080}
-            },
-            "Canny Edge": {
-                "canny_low": {"type": "int", "default": 40, "min": 0, "max": 255},
-                "canny_high": {"type": "int", "default": 120, "min": 0, "max": 255},
-                "canny_aperture": {"type": "choice", "default": 3, "choices": [3, 5, 7]},
-                "canny_L2gradient": {"type": "bool", "default": False}
-            },
-            "HSV Mask": {
-                "use_hsv_mask": {"type": "bool", "default": True},
-                "hsv_lower_h": {"type": "int", "default": 0, "min": 0, "max": 180},
+            "Black Line Detection": {
+                "roi_x": {"type": "int", "default": 0, "min": -1, "max": 1920},
+                "roi_y": {"type": "int", "default": 320, "min": -1, "max": 1080},
+                "roi_w": {"type": "int", "default": 640, "min": -1, "max": 1920},
+                "roi_h": {"type": "int", "default": 160, "min": -1, "max": 1080},
                 "hsv_lower_s": {"type": "int", "default": 0, "min": 0, "max": 255},
-                "hsv_lower_v": {"type": "int", "default": 0, "min": 0, "max": 255},
-                "hsv_upper_h": {"type": "int", "default": 180, "min": 0, "max": 180},
-                "hsv_upper_s": {"type": "int", "default": 40, "min": 0, "max": 255},
-                "hsv_upper_v": {"type": "int", "default": 148, "min": 0, "max": 255},
+                "hsv_upper_s": {"type": "int", "default": 255, "min": 0, "max": 255},
+                "hsv_upper_v": {"type": "int", "default": 80, "min": 0, "max": 255},
                 "hsv_dilate_kernel": {"type": "int", "default": 3, "min": 1, "max": 21, "step": 2},
-                "hsv_dilate_iter": {"type": "int", "default": 2, "min": 0, "max": 10}
+                "hsv_dilate_iter": {"type": "int", "default": 1, "min": 0, "max": 10},
+                "show_mask": {"type": "bool", "default": False},
+                "show_contours": {"type": "bool", "default": False}
             },
-            "Hough Transform": {
-                "hough_type": {"type": "choice", "default": "probabilistic",
-                               "choices": ["probabilistic", "standard"]},
-                "rho": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
-                "theta_deg": {"type": "double", "default": 1.0, "min": 0.1, "max": 5.0},
-                "threshold": {"type": "int", "default": 50, "min": 1, "max": 200},
-                "min_line_length": {"type": "double", "default": 30.0, "min": 1.0, "max": 200.0},
-                "max_line_gap": {"type": "double", "default": 10.0, "min": 1.0, "max": 100.0},
-                "min_theta_deg": {"type": "double", "default": 0.0, "min": 0.0, "max": 180.0},
-                "max_theta_deg": {"type": "double", "default": 180.0, "min": 0.0, "max": 180.0}
+            "Blue Line Detection": {
+                "blue_detection_enabled": {"type": "bool", "default": True},
+                "blue_lower_h": {"type": "int", "default": 100, "min": 0, "max": 180},
+                "blue_upper_h": {"type": "int", "default": 130, "min": 0, "max": 180},
+                "blue_lower_s": {"type": "int", "default": 50, "min": 0, "max": 255},
+                "blue_upper_s": {"type": "int", "default": 255, "min": 0, "max": 255},
+                "blue_lower_v": {"type": "int", "default": 50, "min": 0, "max": 255},
+                "blue_upper_v": {"type": "int", "default": 255, "min": 0, "max": 255}
+            },
+            "Gray Disk Detection": {
+                "gray_detection_enabled": {"type": "bool", "default": True},
+                "gray_upper_s": {"type": "int", "default": 16, "min": 0, "max": 255},
+                "gray_lower_v": {"type": "int", "default": 100, "min": 0, "max": 255},
+                "gray_upper_v": {"type": "int", "default": 168, "min": 0, "max": 255}
+            },
+            "Branch/Merge Handling": {
+                "branch_merge_enabled": {"type": "bool", "default": True},
+                "use_simple_selector": {"type": "bool", "default": True},
+                "branch_strategy": {"type": "choice", "choices": ["alternating", "left_priority", "right_priority", "straight_priority"], "default": "alternating"},
+                "merge_strategy": {"type": "choice", "choices": ["continuity", "width_based", "center_based"], "default": "continuity"},
+                "continuity_threshold": {"type": "double", "default": 30.0, "min": 10.0, "max": 100.0}
+            },
+            "Line Tracking": {
+                "line_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
+                "min_line_width": {"type": "double", "default": 6.0, "min": 1.0, "max": 50.0},
+                "line_width_importance": {"type": "double", "default": 2.0, "min": 1.0, "max": 5.0},
+                "min_contour_score": {"type": "double", "default": 10.0, "min": 1.0, "max": 50.0},
+                "min_segments_straight": {"type": "int", "default": 5, "min": 1, "max": 20},
+                "min_segments_curve": {"type": "int", "default": 3, "min": 1, "max": 20},
+                "robot_distance_weight": {"type": "double", "default": 5.0, "min": 0.0, "max": 10.0}
+            },
+            "Contour Tracking": {
+                "tracker_enabled": {"type": "bool", "default": True},
+                "tracker_max_missed_frames": {"type": "int", "default": 5, "min": 1, "max": 20},
+                "tracker_max_distance": {"type": "double", "default": 75.0, "min": 10.0, "max": 200.0},
+                "tracker_process_noise": {"type": "double", "default": 0.01, "min": 0.001, "max": 0.1, "step": 0.001},
+                "tracker_measurement_noise": {"type": "double", "default": 0.05, "min": 0.001, "max": 0.5, "step": 0.001},
+                "tracker_speed_threshold": {"type": "double", "default": 5.0, "min": 1.0, "max": 20.0},
+                "tracker_debug": {"type": "bool", "default": False}
             },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
@@ -199,17 +216,14 @@ class LineDetectorParameterGUI:
                 "calib_hsv_v_min": {"type": "int", "default": 100, "min": 0, "max": 255},
                 "calib_hsv_v_max": {"type": "int", "default": 168, "min": 0, "max": 255},
                 "calib_min_area": {"type": "int", "default": 80, "min": 10, "max": 1000},
-                "calib_min_major_px": {"type": "int", "default": 8, "min": 1, "max": 100},
-                "calib_max_major_ratio": {"type": "double", "default": 0.65, "min": 0.1, "max": 1.0},
-                "calib_fill_min": {"type": "double", "default": 0.25, "min": 0.0, "max": 1.0},
                 "calib_roi_x": {"type": "int", "default": 200, "min": -1, "max": 1920},
                 "calib_roi_y": {"type": "int", "default": 150, "min": -1, "max": 1080},
                 "calib_roi_w": {"type": "int", "default": 240, "min": -1, "max": 1920},
                 "calib_roi_h": {"type": "int", "default": 180, "min": -1, "max": 1080}
             },
-            "Visualization": {
-                "draw_thickness": {"type": "int", "default": 2, "min": 1, "max": 10},
-
+            "Localization": {
+                "landmark_map_x": {"type": "double", "default": -0.409, "min": -5.0, "max": 5.0},
+                "landmark_map_y": {"type": "double", "default": 1.0, "min": -5.0, "max": 5.0}
             }
         }
 
@@ -293,16 +307,19 @@ class LineDetectorParameterGUI:
     def setup_ros(self):
         """Setup ROS2 node and connections"""
         def ros_thread():
-            rclpy.init()
-            self.ros_node = LineDetectorGUINode(self.image_callback)
             try:
+                rclpy.init()
+                self.ros_node = LineDetectorGUINode(self.image_callback)
                 rclpy.spin(self.ros_node)
             except Exception as e:
                 print(f"ROS error: {e}")
             finally:
                 if self.ros_node:
                     self.ros_node.destroy_node()
-                rclpy.shutdown()
+                try:
+                    rclpy.shutdown()
+                except:
+                    pass  # Ignore shutdown errors
 
         self.ros_thread = threading.Thread(target=ros_thread, daemon=True)
         self.ros_thread.start()
@@ -442,21 +459,27 @@ class LineDetectorParameterGUI:
 
         # Add ROI array parameters
         param_names.extend(['roi', 'calib_roi'])
+        
+        print(f"Attempting to fetch {len(param_names)} parameters from node...")
+        print(f"Parameter names: {param_names[:10]}...")  # Show first 10 for debugging
 
         # Get parameters from node
         fetched_params = self.ros_node.get_parameters_from_node(param_names)
 
         if fetched_params:
-            print(f"Fetched {len(fetched_params)} parameters from node")
+            print(f"Successfully fetched {len(fetched_params)} parameters from node")
+            # Note: 'fetch' status label doesn't exist, using 'connection' instead
             self.update_status(
-                'fetch', f"Loaded {len(fetched_params)} parameters from node")
+                'connection', f"Connected - Loaded {len(fetched_params)} parameters")
 
             # Update GUI widgets and internal parameters
+            updated_count = 0
             for param_name, value in fetched_params.items():
                 if param_name in self.parameter_widgets:
                     try:
                         self.parameter_widgets[param_name].set(value)
                         self.parameters[param_name] = value
+                        updated_count += 1
 
                         # Update value label for scale widgets
                         if f"{param_name}_label" in self.parameter_widgets:
@@ -465,10 +488,11 @@ class LineDetectorParameterGUI:
                     except tk.TclError as e:
                         print(
                             f"Warning: Failed to set parameter {param_name}={value}: {e}")
+            print(f"Updated {updated_count} GUI widgets with node parameters")
         else:
             print("Warning: No parameters fetched from node, using defaults")
             self.update_status(
-                'fetch', "Using default parameters (node not accessible)")
+                'connection', "Connected - Using default parameters")
 
     def parameter_changed(self, param_name: str, value: Any):
         """Handle parameter changes"""
@@ -598,13 +622,8 @@ class LineDetectorGUINode(Node):
             roi_param_name = 'roi'
             components = ['roi_x', 'roi_y', 'roi_w', 'roi_h']
 
-        # Get all current values
-        roi_values = []
-        for comp in components:
-            if comp in self.parameters:
-                roi_values.append(int(self.parameters[comp]))
-            else:
-                roi_values.append(-1)  # default value
+        # Get all current values - use default values since we don't track them here
+        roi_values = [-1, -1, -1, -1]  # default values
 
         # Create array parameter
         param = Parameter()
@@ -621,9 +640,15 @@ class LineDetectorGUINode(Node):
 
     def get_parameters_from_node(self, param_names: list) -> dict:
         """Get parameters from the target node"""
-        if not self.param_get_client.service_is_ready():
-            self.get_logger().warn("Parameter get service not ready")
-            return {}
+        # Wait a bit for service to be ready
+        timeout_start = time.time()
+        while not self.param_get_client.service_is_ready():
+            if time.time() - timeout_start > 3.0:
+                self.get_logger().warn("Parameter get service not ready after 3 seconds")
+                return {}
+            time.sleep(0.1)
+        
+        self.get_logger().info(f"Parameter service is ready, fetching {len(param_names)} parameters")
 
         request = GetParameters.Request()
         request.names = param_names

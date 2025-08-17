@@ -42,5 +42,13 @@ For simulation:
 - Write all documentation, code comments, and branch names in **English**.  
 - If the design policy changes, **update `doc/DESIGN.md` as well**.
 
+## Building
+Use the following command to build the package:
+```bash
+colcon build --packages-select etrobo_line_detector \
+--build-base ../../build \
+--install-base ../../install
+```
+
 ## Testing
 Run the following after making changes:

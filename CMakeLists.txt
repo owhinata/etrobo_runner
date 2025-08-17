@@ -16,9 +16,17 @@ find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 find_package(geometry_msgs REQUIRED)
 
-add_executable(etrobo_line_detector src/etrobo_line_detector.cpp)
+add_executable(etrobo_line_detector 
+  src/main.cpp
+  src/line_detector_node.cpp
+  src/camera_calibrator.cpp
+  src/adaptive_line_tracker.cpp
+  src/contour_tracker.cpp
+  src/branch_merge_handler.cpp
+  src/simple_line_selector.cpp
+)
 target_include_directories(etrobo_line_detector PUBLIC
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
   $<INSTALL_INTERFACE:include>)
 target_compile_features(etrobo_line_detector PUBLIC c_std_99 cxx_std_17)  # Require C99 and C++17
 ament_target_dependencies(etrobo_line_detector

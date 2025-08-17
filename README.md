@@ -90,6 +90,32 @@ The GUI provides:
 - **Anti-flicker**: Smooth 30fps display with optimized rendering
 - **Calibration Support**: Interactive tuning of gray disk detection parameters during calibration with HSV mask visualization
 
+### Contour Tracking Tips
+
+The line detector includes temporal contour tracking with Kalman filtering. For optimal performance on different track types:
+
+```bash
+# For curves and complex tracks (more adaptive tracking)
+ros2 run etrobo_line_detector etrobo_line_detector --ros-args \
+  -p tracker_process_noise:=0.02 \
+  -p tracker_measurement_noise:=0.03 \
+  -p tracker_speed_threshold:=3.0 \
+  -p tracker_max_distance:=100.0
+
+# For straight tracks (more stable tracking)
+ros2 run etrobo_line_detector etrobo_line_detector --ros-args \
+  -p tracker_process_noise:=0.005 \
+  -p tracker_measurement_noise:=0.08 \
+  -p tracker_speed_threshold:=7.0 \
+  -p tracker_max_distance:=50.0
+```
+
+Key tracking parameters:
+- **tracker_process_noise**: Higher values make tracking more responsive but noisier (default: 0.01)
+- **tracker_measurement_noise**: Lower values trust measurements more (default: 0.05)
+- **tracker_speed_threshold**: Speed (pixels/frame) above which matching distance increases (default: 5.0)
+- **tracker_max_distance**: Maximum pixel distance for contour matching (default: 75.0)
+
 ## Topics
 - **Input**: `~image` (`sensor_msgs/msg/Image`) — source camera image
   - `~camera_info` (`sensor_msgs/msg/CameraInfo`) — camera intrinsics for calibration
