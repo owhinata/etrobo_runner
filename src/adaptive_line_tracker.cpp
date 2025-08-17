@@ -9,8 +9,10 @@
 #include <opencv2/opencv.hpp>
 #include <string>
 
+#include "src/branch_merge_handler.hpp"
 #include "src/contour_tracker.hpp"
 #include "src/line_detector_node.hpp"
+#include "src/simple_line_selector.hpp"
 
 // Implementation class
 class AdaptiveLineTracker::Impl {
@@ -148,6 +150,15 @@ class AdaptiveLineTracker::Impl {
 
   // Contour tracker for temporal tracking
   std::unique_ptr<ContourTracker> contour_tracker_;
+
+  // Branch/merge handler for handling line topology
+  std::unique_ptr<BranchMergeHandler> branch_merge_handler_;
+  std::map<int, std::vector<BranchMergeHandler::Segment>>
+      previous_contour_segments_;
+
+  // Simple line selector as alternative
+  std::unique_ptr<SimpleLineSelector> simple_selector_;
+  bool use_simple_selector_{false};  // Flag to enable simple selector
 };
 
 // AdaptiveLineTracker
@@ -191,11 +202,21 @@ AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {
   contour_tracker_->set_max_missed_frames(5);
   contour_tracker_->set_max_distance_threshold(75.0);  // Increased for curves
   contour_tracker_->set_min_contour_area(20.0);
+
+  // Initialize branch/merge handler
+  branch_merge_handler_ = std::make_unique<BranchMergeHandler>();
+
+  // Initialize simple selector
+  simple_selector_ = std::make_unique<SimpleLineSelector>(10);
 }
 
 void AdaptiveLineTracker::Impl::reset() {
   confidence_ = 0.0;
   last_result_ = AdaptiveLineTracker::DetectionResult();
+  previous_contour_segments_.clear();
+  if (simple_selector_) {
+    simple_selector_->reset();
+  }
 }
 
 void AdaptiveLineTracker::Impl::declare_parameters() {
@@ -272,6 +293,48 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
       node_->declare_parameter<int>("min_segments_straight", 5);
   config_.min_segments_curve =
       node_->declare_parameter<int>("min_segments_curve", 3);
+
+  // Branch/Merge handler parameters
+  bool bmh_enabled =
+      node_->declare_parameter<bool>("branch_merge_enabled", true);
+  use_simple_selector_ = node_->declare_parameter<bool>(
+      "use_simple_selector", true);  // Use simple selector by default
+  std::string bmh_branch_strategy =
+      node_->declare_parameter<std::string>("branch_strategy", "alternating");
+  std::string bmh_merge_strategy =
+      node_->declare_parameter<std::string>("merge_strategy", "continuity");
+  double bmh_continuity_threshold =
+      node_->declare_parameter<double>("continuity_threshold", 30.0);
+
+  // Configure branch/merge handler
+  if (branch_merge_handler_) {
+    BranchMergeHandler::Config bmh_config;
+    bmh_config.enabled = bmh_enabled;
+
+    // Parse branch strategy
+    if (bmh_branch_strategy == "left_priority") {
+      bmh_config.branch_strategy = BranchMergeHandler::Config::LEFT_PRIORITY;
+    } else if (bmh_branch_strategy == "right_priority") {
+      bmh_config.branch_strategy = BranchMergeHandler::Config::RIGHT_PRIORITY;
+    } else if (bmh_branch_strategy == "straight_priority") {
+      bmh_config.branch_strategy =
+          BranchMergeHandler::Config::STRAIGHT_PRIORITY;
+    } else {
+      bmh_config.branch_strategy = BranchMergeHandler::Config::ALTERNATING;
+    }
+
+    // Parse merge strategy
+    if (bmh_merge_strategy == "width_based") {
+      bmh_config.merge_strategy = BranchMergeHandler::Config::WIDTH_BASED;
+    } else if (bmh_merge_strategy == "center_based") {
+      bmh_config.merge_strategy = BranchMergeHandler::Config::CENTER_BASED;
+    } else {
+      bmh_config.merge_strategy = BranchMergeHandler::Config::CONTINUITY;
+    }
+
+    bmh_config.continuity_threshold = bmh_continuity_threshold;
+    branch_merge_handler_->set_config(bmh_config);
+  }
 }
 
 bool AdaptiveLineTracker::Impl::try_update_parameter(
@@ -353,6 +416,54 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
   } else if (name == "gray_upper_v") {
     gray_upper_v_ = param.as_int();
     return true;
+  }
+
+  // Classifier selection
+  if (name == "use_simple_selector") {
+    use_simple_selector_ = param.as_bool();
+    return true;
+  }
+
+  // Branch/Merge handler parameter updates
+  if (branch_merge_handler_) {
+    auto bmh_config = branch_merge_handler_->get_config();
+    bool updated = false;
+
+    if (name == "branch_merge_enabled") {
+      bmh_config.enabled = param.as_bool();
+      updated = true;
+    } else if (name == "branch_strategy") {
+      std::string strategy = param.as_string();
+      if (strategy == "left_priority") {
+        bmh_config.branch_strategy = BranchMergeHandler::Config::LEFT_PRIORITY;
+      } else if (strategy == "right_priority") {
+        bmh_config.branch_strategy = BranchMergeHandler::Config::RIGHT_PRIORITY;
+      } else if (strategy == "straight_priority") {
+        bmh_config.branch_strategy =
+            BranchMergeHandler::Config::STRAIGHT_PRIORITY;
+      } else {
+        bmh_config.branch_strategy = BranchMergeHandler::Config::ALTERNATING;
+      }
+      updated = true;
+    } else if (name == "merge_strategy") {
+      std::string strategy = param.as_string();
+      if (strategy == "width_based") {
+        bmh_config.merge_strategy = BranchMergeHandler::Config::WIDTH_BASED;
+      } else if (strategy == "center_based") {
+        bmh_config.merge_strategy = BranchMergeHandler::Config::CENTER_BASED;
+      } else {
+        bmh_config.merge_strategy = BranchMergeHandler::Config::CONTINUITY;
+      }
+      updated = true;
+    } else if (name == "continuity_threshold") {
+      bmh_config.continuity_threshold = param.as_double();
+      updated = true;
+    }
+
+    if (updated) {
+      branch_merge_handler_->set_config(bmh_config);
+      return true;
+    }
   }
 
   // Tracker parameter updates
@@ -526,17 +637,68 @@ AdaptiveLineTracker::Impl::collect_and_score_contours(
   for (int y = black_mask.rows - 2; y > 0; y -= scan_step) {
     auto segments = find_black_segments(black_mask, y);
 
+    // Group segments by contour
+    std::map<int, std::vector<BranchMergeHandler::Segment>> contour_to_segments;
     for (const auto& seg : segments) {
       int contour_idx = find_segment_contour(contours, seg, y);
       if (contour_idx >= 0 && contour_idx < static_cast<int>(contours.size())) {
+        // Convert to BranchMergeHandler::Segment
+        BranchMergeHandler::Segment bmh_seg{seg.start_x, seg.end_x};
+        contour_to_segments[contour_idx].push_back(bmh_seg);
+      }
+    }
+
+    // Process each contour's segments
+    for (const auto& [contour_idx, segs] : contour_to_segments) {
+      std::optional<BranchMergeHandler::Segment> selected_segment;
+
+      // Use simple selector for primary contour
+      if (use_simple_selector_ && segs.size() > 0 && contour_idx == 0) {
+        // Convert to SimpleLineSelector segments
+        std::vector<SimpleLineSelector::Segment> simple_segs;
+        for (const auto& seg : segs) {
+          SimpleLineSelector::Segment ss;
+          ss.start_x = seg.start_x;
+          ss.end_x = seg.end_x;
+          ss.y = y;
+          simple_segs.push_back(ss);
+        }
+
+        // Add scan to selector
+        simple_selector_->add_scan(y, simple_segs);
+
+        // Get selected segment
+        auto selected_simple = simple_selector_->get_best_segment();
+        if (selected_simple) {
+          // Convert back to BranchMergeHandler::Segment
+          BranchMergeHandler::Segment bmh_seg;
+          bmh_seg.start_x = selected_simple->start_x;
+          bmh_seg.end_x = selected_simple->end_x;
+          selected_segment = bmh_seg;
+        }
+      } else {
+        // Use original branch/merge handler
+        BranchMergeHandler::SegmentContext context;
+        context.current_segments = segs;
+        context.previous_segments = previous_contour_segments_[contour_idx];
+        context.contour_id = contour_idx;
+        context.scan_y = y;
+        context.scan_step = scan_step;
+
+        // Let handler select the appropriate segment
+        selected_segment = branch_merge_handler_->process_segments(context);
+      }
+
+      if (selected_segment) {
         // Calculate segment score
+        Segment seg{selected_segment->start_x, selected_segment->end_x};
         double score =
             calculate_segment_score(seg, y, black_mask.rows, black_mask.cols);
 
         // Create SegmentInfo
         SegmentInfo seg_info;
-        seg_info.center = cv::Point2d(seg.center(), y);
-        seg_info.width = seg.width();
+        seg_info.center = cv::Point2d(selected_segment->center(), y);
+        seg_info.width = selected_segment->width();
         seg_info.score = score;
 
         // Add to contour segments
@@ -546,6 +708,9 @@ AdaptiveLineTracker::Impl::collect_and_score_contours(
         contour_scores[contour_idx].segment_count++;
         contour_scores[contour_idx].weighted_score += score;
       }
+
+      // Update previous segments for next iteration
+      previous_contour_segments_[contour_idx] = segs;
     }
   }
 

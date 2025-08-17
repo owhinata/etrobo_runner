@@ -183,6 +183,13 @@ class LineDetectorParameterGUI:
                 "gray_lower_v": {"type": "int", "default": 100, "min": 0, "max": 255},
                 "gray_upper_v": {"type": "int", "default": 168, "min": 0, "max": 255}
             },
+            "Branch/Merge Handling": {
+                "branch_merge_enabled": {"type": "bool", "default": True},
+                "use_simple_selector": {"type": "bool", "default": True},
+                "branch_strategy": {"type": "choice", "choices": ["alternating", "left_priority", "right_priority", "straight_priority"], "default": "alternating"},
+                "merge_strategy": {"type": "choice", "choices": ["continuity", "width_based", "center_based"], "default": "continuity"},
+                "continuity_threshold": {"type": "double", "default": 30.0, "min": 10.0, "max": 100.0}
+            },
             "Line Tracking": {
                 "line_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
                 "min_line_width": {"type": "double", "default": 6.0, "min": 1.0, "max": 50.0},
