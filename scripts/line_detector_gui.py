@@ -200,17 +200,6 @@ class LineDetectorParameterGUI:
                 "tracker_speed_threshold": {"type": "double", "default": 5.0, "min": 1.0, "max": 20.0},
                 "tracker_debug": {"type": "bool", "default": False}
             },
-            "Line Merging": {
-                "merger_enabled": {"type": "bool", "default": False},
-                "merger_method": {"type": "choice", "choices": ["direction_endpoint", "kalman_graph"], "default": "direction_endpoint"},
-                "merger_max_angle_diff": {"type": "double", "default": 20.0, "min": 5.0, "max": 90.0},
-                "merger_max_endpoint_dist": {"type": "double", "default": 50.0, "min": 10.0, "max": 200.0},
-                "merger_min_line_length": {"type": "double", "default": 30.0, "min": 10.0, "max": 100.0},
-                "merger_prediction_frames": {"type": "int", "default": 5, "min": 1, "max": 20},
-                "merger_trajectory_threshold": {"type": "double", "default": 50.0, "min": 10.0, "max": 300.0},
-                "merger_confidence": {"type": "double", "default": 0.7, "min": 0.1, "max": 1.0, "step": 0.1},
-                "merger_debug": {"type": "bool", "default": False}
-            },
             "Calibration": {
                 "camera_height_meters": {"type": "double", "default": 0.2, "min": 0.05, "max": 1.0},
                 "landmark_distance_meters": {"type": "double", "default": 0.59, "min": 0.1, "max": 2.0},

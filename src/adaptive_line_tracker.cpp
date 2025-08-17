@@ -11,7 +11,6 @@
 
 #include "src/contour_tracker.hpp"
 #include "src/line_detector_node.hpp"
-#include "src/line_merger.hpp"
 
 // Implementation class
 class AdaptiveLineTracker::Impl {
@@ -144,9 +143,6 @@ class AdaptiveLineTracker::Impl {
 
   // Contour tracker for temporal tracking
   std::unique_ptr<ContourTracker> contour_tracker_;
-
-  // Line merger for combining similar lines
-  std::unique_ptr<LineMerger> line_merger_;
 };
 
 // AdaptiveLineTracker
@@ -190,9 +186,6 @@ AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {
   contour_tracker_->set_max_missed_frames(5);
   contour_tracker_->set_max_distance_threshold(75.0);  // Increased for curves
   contour_tracker_->set_min_contour_area(20.0);
-
-  // Initialize line merger
-  line_merger_ = std::make_unique<LineMerger>();
 }
 
 void AdaptiveLineTracker::Impl::reset() {
@@ -252,24 +245,6 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   double tracker_speed_threshold =
       node_->declare_parameter<double>("tracker_speed_threshold", 5.0);
 
-  // Line merger parameters
-  bool merger_enabled = node_->declare_parameter<bool>("merger_enabled", false);
-  std::string merger_method = node_->declare_parameter<std::string>(
-      "merger_method", "direction_endpoint");
-  double merger_max_angle =
-      node_->declare_parameter<double>("merger_max_angle_diff", 20.0);
-  double merger_max_endpoint_dist =
-      node_->declare_parameter<double>("merger_max_endpoint_dist", 50.0);
-  double merger_min_line_length =
-      node_->declare_parameter<double>("merger_min_line_length", 30.0);
-  int merger_prediction_frames =
-      node_->declare_parameter<int>("merger_prediction_frames", 5);
-  double merger_trajectory_threshold =
-      node_->declare_parameter<double>("merger_trajectory_threshold", 50.0);
-  double merger_confidence =
-      node_->declare_parameter<double>("merger_confidence", 0.7);
-  bool merger_debug = node_->declare_parameter<bool>("merger_debug", false);
-
   // Configure tracker with parameters
   if (contour_tracker_) {
     contour_tracker_->set_enabled(tracker_enabled);
@@ -279,23 +254,6 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
     contour_tracker_->set_process_noise(tracker_process_noise);
     contour_tracker_->set_measurement_noise(tracker_measurement_noise);
     contour_tracker_->set_speed_threshold(tracker_speed_threshold);
-  }
-
-  // Configure line merger with parameters
-  if (line_merger_) {
-    LineMerger::MergeConfig merge_config;
-    merge_config.enabled = merger_enabled;
-    merge_config.method = (merger_method == "kalman_graph")
-                              ? LineMerger::MergeMethod::KALMAN_GRAPH
-                              : LineMerger::MergeMethod::DIRECTION_ENDPOINT;
-    merge_config.max_angle_diff = merger_max_angle;
-    merge_config.max_endpoint_dist = merger_max_endpoint_dist;
-    merge_config.min_line_length = merger_min_line_length;
-    merge_config.prediction_frames = merger_prediction_frames;
-    merge_config.trajectory_threshold = merger_trajectory_threshold;
-    merge_config.merge_confidence = merger_confidence;
-    merge_config.debug_enabled = merger_debug;
-    line_merger_->set_config(merge_config);
   }
 
   // Line tracking configuration parameters
@@ -421,49 +379,6 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     return true;
   }
 
-  // Line merger parameter updates
-  if (line_merger_) {
-    LineMerger::MergeConfig config = line_merger_->get_config();
-    bool updated = false;
-
-    if (name == "merger_enabled") {
-      config.enabled = param.as_bool();
-      updated = true;
-    } else if (name == "merger_method") {
-      std::string method = param.as_string();
-      config.method = (method == "kalman_graph")
-                          ? LineMerger::MergeMethod::KALMAN_GRAPH
-                          : LineMerger::MergeMethod::DIRECTION_ENDPOINT;
-      updated = true;
-    } else if (name == "merger_max_angle_diff") {
-      config.max_angle_diff = param.as_double();
-      updated = true;
-    } else if (name == "merger_max_endpoint_dist") {
-      config.max_endpoint_dist = param.as_double();
-      updated = true;
-    } else if (name == "merger_min_line_length") {
-      config.min_line_length = param.as_double();
-      updated = true;
-    } else if (name == "merger_prediction_frames") {
-      config.prediction_frames = param.as_int();
-      updated = true;
-    } else if (name == "merger_trajectory_threshold") {
-      config.trajectory_threshold = param.as_double();
-      updated = true;
-    } else if (name == "merger_confidence") {
-      config.merge_confidence = param.as_double();
-      updated = true;
-    } else if (name == "merger_debug") {
-      config.debug_enabled = param.as_bool();
-      updated = true;
-    }
-
-    if (updated) {
-      line_merger_->set_config(config);
-      return true;
-    }
-  }
-
   return false;
 }
 
@@ -515,49 +430,13 @@ bool AdaptiveLineTracker::Impl::process_frame(
     RCLCPP_DEBUG(node_->get_logger(), "%s", tracking_info.c_str());
   }
 
-  // Apply line merging if enabled
+  // Filter tracked contours by area and missed frames
   std::vector<std::vector<cv::Point>> contours;
-  std::map<int, std::set<int>>
-      contour_to_ids;  // Map from contour index to original tracker IDs
-
-  if (line_merger_ && line_merger_->get_config().enabled) {
-    // Get merged contours
-    contours = line_merger_->merge_lines(all_tracked);
-    contour_to_ids = line_merger_->get_merged_id_mapping();
-
-    // Log merge information
-    auto merge_groups = line_merger_->get_merge_groups();
-    if (!merge_groups.empty()) {
-      for (const auto& [group_id, members] : merge_groups) {
-        if (members.size() > 1) {
-          std::string merge_info = "Merged IDs: {";
-          for (int id : members) {
-            merge_info += std::to_string(id) + ",";
-          }
-          merge_info.back() = '}';
-          merge_info += " -> Contour ";
-          // Find which result index contains these IDs
-          for (const auto& [idx, ids] : contour_to_ids) {
-            if (ids == members) {
-              merge_info += std::to_string(idx);
-              break;
-            }
-          }
-          RCLCPP_DEBUG(node_->get_logger(), "%s", merge_info.c_str());
-        }
-      }
-    }
-  } else {
-    // Filter tracked contours by area and missed frames (original behavior)
-    constexpr double MIN_CONTOUR_AREA = 20.0;
-    contours.reserve(all_tracked.size());
-    int idx = 0;
-    for (const auto& [id, tracked] : all_tracked) {
-      if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
-        contours.push_back(tracked.contour);
-        contour_to_ids[idx] = {id};  // Single ID for unmerged contour
-        idx++;
-      }
+  constexpr double MIN_CONTOUR_AREA = 20.0;
+  contours.reserve(all_tracked.size());
+  for (const auto& [id, tracked] : all_tracked) {
+    if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
+      contours.push_back(tracked.contour);
     }
   }
 
@@ -566,43 +445,10 @@ bool AdaptiveLineTracker::Impl::process_frame(
   auto contour_scores =
       collect_and_score_contours(black_mask, contours, contour_segments);
 
-  // If merging is enabled, combine scores for merged contours
-  if (!contour_to_ids.empty() && line_merger_ &&
-      line_merger_->get_config().enabled) {
-    // Create a map from original ID to contour index
-    std::map<int, int> id_to_contour_idx;
-    for (const auto& [idx, ids] : contour_to_ids) {
-      for (int id : ids) {
-        id_to_contour_idx[id] = idx;
-      }
-    }
-
-    // For merged contours, combine their scores
-    for (const auto& [idx, ids] : contour_to_ids) {
-      if (ids.size() > 1) {
-        // This is a merged contour - the score should already be calculated
-        // But we should log it for debugging
-        auto score_it = contour_scores.find(idx);
-        if (score_it != contour_scores.end()) {
-          std::string merge_score_info =
-              "Merged contour " + std::to_string(idx) + " (IDs: ";
-          for (int id : ids) {
-            merge_score_info += std::to_string(id) + "+";
-          }
-          if (!ids.empty()) merge_score_info.pop_back();  // Remove last '+'
-          merge_score_info +=
-              ") score: " + std::to_string(score_it->second.weighted_score);
-          RCLCPP_DEBUG(node_->get_logger(), "%s", merge_score_info.c_str());
-        }
-      }
-    }
-  }
-
   // Find the highest scoring contour
   result.best_contour_id = -1;
   result.best_contour_score = 0.0;
   result.best_contour.clear();
-  std::set<int> best_merged_ids;  // Store merged IDs for best contour
 
   for (const auto& [contour_id, score] : contour_scores) {
     if (score.weighted_score > result.best_contour_score) {
@@ -610,45 +456,13 @@ bool AdaptiveLineTracker::Impl::process_frame(
       result.best_contour_id = contour_id;
       if (contour_id >= 0 && contour_id < static_cast<int>(contours.size())) {
         result.best_contour = contours[contour_id];
-        // Store merged IDs if available
-        auto it = contour_to_ids.find(contour_id);
-        if (it != contour_to_ids.end()) {
-          best_merged_ids = it->second;
-        } else {
-          best_merged_ids.clear();
-        }
       }
     }
-  }
-
-  // Log the best contour with merged IDs
-  if (result.best_contour_id >= 0 && !best_merged_ids.empty() &&
-      best_merged_ids.size() > 1) {
-    std::string best_info = "Best contour: ID:";
-    for (int id : best_merged_ids) {
-      best_info += std::to_string(id) + "+";
-    }
-    if (!best_merged_ids.empty()) best_info.pop_back();  // Remove last '+'
-    best_info += " (score: " + std::to_string(result.best_contour_score) + ")";
-    RCLCPP_DEBUG(node_->get_logger(), "%s", best_info.c_str());
   }
 
   // Step 4: Build TrackedLine structures using scoring
   result.tracked_lines =
       build_tracked_lines(contour_segments, contour_scores, contours);
-
-  // Update TrackedLine IDs to show merged IDs
-  if (!contour_to_ids.empty()) {
-    for (auto& line : result.tracked_lines) {
-      auto it = contour_to_ids.find(line.contour_id);
-      if (it != contour_to_ids.end() && !it->second.empty()) {
-        // Store all merged IDs
-        line.merged_ids = it->second;
-        // Use the first original ID as the main ID
-        line.contour_id = *it->second.begin();
-      }
-    }
-  }
 
   // Step 5: Populate statistics for result
   result.total_contours = all_contours.size();
@@ -1025,32 +839,9 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
       // Draw centroid
       cv::circle(img, centroid_offset, 4, contour_color, -1);
 
-      // Draw ID text - check if this ID is part of a merged group
+      // Draw ID text
       std::string text = "ID:" + std::to_string(id);
-
-      // Check if this ID is merged with others
-      bool is_merged = false;
-      std::set<int> merged_ids;
-      if (line_merger_ && line_merger_->get_config().enabled) {
-        auto merge_groups = line_merger_->get_merge_groups();
-        for (const auto& [group_id, members] : merge_groups) {
-          if (members.size() > 1 && members.find(id) != members.end()) {
-            // This ID is part of a merged group - show all IDs
-            text = "ID:";
-            bool first = true;
-            for (int mid : members) {
-              if (!first) text += "+";
-              text += std::to_string(mid);
-              first = false;
-            }
-            is_merged = true;
-            merged_ids = members;
-            break;
-          }
-        }
-      }
-
-      if (tracked_contour.age > 1 && !is_merged) {
+      if (tracked_contour.age > 1) {
         text += " (" + std::to_string(tracked_contour.age) + ")";
       }
       cv::putText(img, text,
