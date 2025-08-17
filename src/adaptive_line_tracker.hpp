@@ -65,6 +65,10 @@ class AdaptiveLineTracker {
     double min_contour_score = 10.0;  // Minimum score for valid contour
     int min_segments_straight = 5;    // Min segments for straight line
     int min_segments_curve = 3;       // Min segments for curve
+
+    // Robot distance weight for scoring (robot position is fixed at bottom
+    // center)
+    double robot_distance_weight = 5.0;  // Weight for robot distance scoring
   };
 
   void set_config(const Config& config);

@@ -10,23 +10,9 @@ BranchMergeHandler::BranchMergeHandler() : config_() {}
 
 std::optional<BranchMergeHandler::Segment> BranchMergeHandler::process_segments(
     const SegmentContext& context) {
-  // Log input segments
-  std::cout << "[BMH] Y=" << context.scan_y
-            << " Current segments: " << context.current_segments.size();
-  for (size_t i = 0; i < context.current_segments.size(); i++) {
-    std::cout << " [" << i << "]: x=" << context.current_segments[i].start_x
-              << "-" << context.current_segments[i].end_x
-              << " (center=" << context.current_segments[i].center()
-              << ", width=" << context.current_segments[i].width() << ")";
-  }
-  std::cout << " | Previous segments: " << context.previous_segments.size()
-            << std::endl;
-
   if (!config_.enabled) {
     // If disabled, return the first segment if available
     if (!context.current_segments.empty()) {
-      std::cout << "[BMH] Handler disabled, returning first segment"
-                << std::endl;
       return context.current_segments[0];
     }
     return std::nullopt;
@@ -41,8 +27,6 @@ std::optional<BranchMergeHandler::Segment> BranchMergeHandler::process_segments(
   // Fallback to simple detection if clusters are not ready
   if (topology == LineTopology::SINGLE && clusters_.size() < 2) {
     topology = detect_topology(context);
-    std::cout << "[BMH] Using simple detection (clusters not ready)"
-              << std::endl;
   }
 
   last_topology_ = topology;
@@ -63,7 +47,6 @@ std::optional<BranchMergeHandler::Segment> BranchMergeHandler::process_segments(
       topology_str = "COMPLEX";
       break;
   }
-  std::cout << "[BMH] Detected topology: " << topology_str << std::endl;
 
   // Handle based on topology
   std::optional<Segment> result;
@@ -81,15 +64,6 @@ std::optional<BranchMergeHandler::Segment> BranchMergeHandler::process_segments(
       // For complex cases, try to use merge logic
       result = handle_merge(context);
       break;
-  }
-
-  // Log selected segment
-  if (result) {
-    std::cout << "[BMH] Selected segment: x=" << result->start_x << "-"
-              << result->end_x << " (center=" << result->center() << ")"
-              << std::endl;
-  } else {
-    std::cout << "[BMH] No segment selected" << std::endl;
   }
 
   return result;
@@ -127,8 +101,6 @@ std::optional<BranchMergeHandler::Segment> BranchMergeHandler::handle_branch(
 
   // For single segment, just return it (branch already completed)
   if (context.current_segments.size() == 1) {
-    std::cout << "[BMH-Branch] Single segment after branch, returning it"
-              << std::endl;
     return context.current_segments[0];
   }
 
@@ -175,17 +147,8 @@ BranchMergeHandler::Segment BranchMergeHandler::select_branch_segment(
   }
 
   if (segments.size() == 1) {
-    std::cout << "[BMH-Branch] Only one segment available, returning it"
-              << std::endl;
     return segments[0];
   }
-
-  std::cout << "[BMH-Branch] Selecting from " << segments.size()
-            << " segments: ";
-  for (size_t i = 0; i < segments.size(); i++) {
-    std::cout << "[" << i << "]:center=" << segments[i].center() << " ";
-  }
-  std::cout << std::endl;
 
   switch (config_.branch_strategy) {
     case Config::LEFT_PRIORITY:
@@ -207,9 +170,6 @@ BranchMergeHandler::Segment BranchMergeHandler::select_branch_segment(
       // Even count (0, 2, 4...): select right
       // Odd count (1, 3, 5...): select left
       bool select_right = (branch_count_ % 2 == 0);
-      std::cout << "[BMH-Branch] ALTERNATING strategy: branch_count="
-                << branch_count_ << " -> selecting "
-                << (select_right ? "RIGHT" : "LEFT") << std::endl;
       branch_count_++;  // Increment for next branch
 
       if (select_right) {
@@ -218,8 +178,6 @@ BranchMergeHandler::Segment BranchMergeHandler::select_branch_segment(
                                         [](const Segment& a, const Segment& b) {
                                           return a.center() < b.center();
                                         });
-        std::cout << "[BMH-Branch] Selected rightmost segment: center="
-                  << result.center() << std::endl;
         return result;
       } else {
         // Select leftmost segment
@@ -227,8 +185,6 @@ BranchMergeHandler::Segment BranchMergeHandler::select_branch_segment(
                                         [](const Segment& a, const Segment& b) {
                                           return a.center() < b.center();
                                         });
-        std::cout << "[BMH-Branch] Selected leftmost segment: center="
-                  << result.center() << std::endl;
         return result;
       }
     }
@@ -396,10 +352,6 @@ void BranchMergeHandler::update_clusters(int y,
 
     clusters_.push_back(new_cluster);
 
-    std::cout << "[BMH-Cluster] Started new cluster #" << clusters_.size()
-              << " at Y=" << y << " with " << segments.size() << " segments"
-              << std::endl;
-
     // Keep only recent clusters
     while (clusters_.size() > MAX_CLUSTERS) {
       clusters_.pop_front();
@@ -408,10 +360,6 @@ void BranchMergeHandler::update_clusters(int y,
     // Add to existing cluster
     clusters_.back().scan_lines.push_back(segments);
     clusters_.back().end_y = y;
-
-    std::cout << "[BMH-Cluster] Added to cluster #" << clusters_.size()
-              << " (size=" << clusters_.back().scan_lines.size() << ")"
-              << std::endl;
 
     // Update statistics for the current cluster
     analyze_cluster_statistics(clusters_.back());
@@ -480,17 +428,6 @@ void BranchMergeHandler::analyze_cluster_statistics(SegmentCluster& cluster) {
 
     cluster.is_stable =
         (variance < 25.0) && (cluster.scan_lines.size() >= MIN_CLUSTER_SIZE);
-
-    // Log statistics
-    std::cout << "[BMH-Stats] Cluster stats: avg_dist="
-              << cluster.avg_segment_distance
-              << " trend=" << cluster.distance_trend << " variance=" << variance
-              << " stable=" << (cluster.is_stable ? "YES" : "NO")
-              << " (distances:";
-    for (double d : distances) {
-      std::cout << " " << d;
-    }
-    std::cout << ")" << std::endl;
   }
 }
 
@@ -513,8 +450,6 @@ double BranchMergeHandler::calculate_segment_distance(
 BranchMergeHandler::LineTopology
 BranchMergeHandler::detect_topology_from_clusters() const {
   if (clusters_.size() < 2) {
-    std::cout << "[BMH-Topology] Not enough clusters (" << clusters_.size()
-              << "), returning SINGLE" << std::endl;
     return LineTopology::SINGLE;
   }
 
@@ -541,84 +476,50 @@ BranchMergeHandler::detect_topology_from_clusters() const {
 
   const auto& prev_cluster = *prev_cluster_ptr;
 
-  std::cout << "[BMH-Topology] Comparing clusters: prev(segs="
-            << prev_cluster.segment_count
-            << " trend=" << prev_cluster.distance_trend
-            << " stable=" << prev_cluster.is_stable
-            << ") curr(segs=" << curr_cluster.segment_count
-            << " trend=" << curr_cluster.distance_trend
-            << " stable=" << curr_cluster.is_stable
-            << " size=" << curr_cluster.scan_lines.size() << ")" << std::endl;
-
   // Need stable clusters for reliable detection
   if (!prev_cluster.is_stable || !curr_cluster.is_stable) {
     // If current cluster is too small, wait for more data
     if (curr_cluster.scan_lines.size() < MIN_CLUSTER_SIZE) {
-      std::cout
-          << "[BMH-Topology] Clusters not stable/ready, waiting for more data"
-          << std::endl;
       return LineTopology::SINGLE;
     }
   }
 
   // Transition from 1 segment to 2+ segments
   if (prev_cluster.segment_count == 1 && curr_cluster.segment_count >= 2) {
-    std::cout << "[BMH-Topology] Transition 1->2+ segments detected"
-              << std::endl;
     // Check the trend in the multi-segment cluster
     if (curr_cluster.distance_trend > 2.0) {
       // Segments are diverging -> this is a branch point
-      std::cout << "[BMH-Topology] BRANCH detected (diverging, trend="
-                << curr_cluster.distance_trend << ")" << std::endl;
       return LineTopology::BRANCH;
     } else if (curr_cluster.distance_trend < -2.0) {
       // Segments are converging -> this is a merge (lines coming together)
-      std::cout << "[BMH-Topology] MERGE detected (converging, trend="
-                << curr_cluster.distance_trend << ")" << std::endl;
       return LineTopology::MERGE;
     }
     // If trend is neutral, need more data
-    std::cout << "[BMH-Topology] Neutral trend (" << curr_cluster.distance_trend
-              << "), need more data" << std::endl;
     return LineTopology::SINGLE;
   }
 
   // Transition from 2+ segments to 1 segment
   if (prev_cluster.segment_count >= 2 && curr_cluster.segment_count == 1) {
-    std::cout << "[BMH-Topology] Transition 2+->1 segments detected"
-              << std::endl;
     // Check the trend in the previous multi-segment cluster
     if (prev_cluster.distance_trend < -2.0) {
       // Segments were converging -> merge completed
-      std::cout << "[BMH-Topology] MERGE completed (was converging, trend="
-                << prev_cluster.distance_trend << ")" << std::endl;
       return LineTopology::MERGE;
     } else if (prev_cluster.distance_trend > 2.0) {
       // Segments were diverging -> branch completed
-      std::cout << "[BMH-Topology] BRANCH completed (was diverging, trend="
-                << prev_cluster.distance_trend << ")" << std::endl;
       return LineTopology::BRANCH;
     }
   }
 
   // Multi-segment cluster analysis
   if (curr_cluster.segment_count >= 2 && curr_cluster.is_stable) {
-    std::cout << "[BMH-Topology] Analyzing stable multi-segment cluster"
-              << std::endl;
     if (curr_cluster.distance_trend < -3.0) {
       // Strong convergence -> merging
-      std::cout << "[BMH-Topology] Strong MERGE detected (trend="
-                << curr_cluster.distance_trend << ")" << std::endl;
       return LineTopology::MERGE;
     } else if (curr_cluster.distance_trend > 3.0) {
       // Strong divergence -> branching
-      std::cout << "[BMH-Topology] Strong BRANCH detected (trend="
-                << curr_cluster.distance_trend << ")" << std::endl;
       return LineTopology::BRANCH;
     }
   }
 
-  std::cout << "[BMH-Topology] No clear topology, returning SINGLE"
-            << std::endl;
   return LineTopology::SINGLE;
 }

@@ -221,8 +221,8 @@ void AdaptiveLineTracker::Impl::reset() {
 
 void AdaptiveLineTracker::Impl::declare_parameters() {
   // Image preprocessing
-  roi_ = node_->declare_parameter<std::vector<int64_t>>("roi",
-                                                        std::vector<int64_t>{});
+  roi_ = node_->declare_parameter<std::vector<int64_t>>(
+      "roi", std::vector<int64_t>{0, 320, 640, 160});
 
   // HSV mask parameters for black line detection
   hsv_lower_s_ = node_->declare_parameter<int>("hsv_lower_s", 0);
@@ -293,6 +293,8 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
       node_->declare_parameter<int>("min_segments_straight", 5);
   config_.min_segments_curve =
       node_->declare_parameter<int>("min_segments_curve", 3);
+  config_.robot_distance_weight =
+      node_->declare_parameter<double>("robot_distance_weight", 5.0);
 
   // Branch/Merge handler parameters
   bool bmh_enabled =
@@ -382,6 +384,9 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     return true;
   } else if (name == "min_segments_curve") {
     config_.min_segments_curve = param.as_int();
+    return true;
+  } else if (name == "robot_distance_weight") {
+    config_.robot_distance_weight = param.as_double();
     return true;
   } else if (name == "blue_detection_enabled") {
     blue_detection_enabled_ = param.as_bool();
@@ -619,8 +624,28 @@ double AdaptiveLineTracker::Impl::calculate_segment_score(const Segment& seg,
   // - Wide segments (curve): higher score based on width
   double width_weight = 1.0 + (relative_width * config_.width_importance);
 
-  // Position weight (bottom of image is more important)
-  double position_weight = 1.0 + (1.0 - (double)y / image_height) * 0.5;
+  // Position weight based on distance from robot position
+  // Robot position is fixed at bottom center of image
+  double robot_x = image_width / 2.0;
+  double robot_y = image_height;
+
+  // Calculate segment center
+  double seg_center_x = (seg.start_x + seg.end_x) / 2.0;
+  double seg_center_y = y;
+
+  // Calculate distance from robot position to segment center
+  double dx = seg_center_x - robot_x;
+  double dy = seg_center_y - robot_y;
+  double distance = std::sqrt(dx * dx + dy * dy);
+
+  // Normalize distance by image diagonal
+  double image_diagonal =
+      std::sqrt(image_width * image_width + image_height * image_height);
+  double normalized_distance = distance / image_diagonal;
+
+  // Closer segments get higher scores (exponential decay)
+  double position_weight = 1.0 + config_.robot_distance_weight *
+                                     std::exp(-normalized_distance * 3.0);
 
   return width_weight * position_weight;
 }

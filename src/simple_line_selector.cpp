@@ -28,12 +28,9 @@ void SimpleLineSelector::add_scan(int y, const std::vector<Segment>& segments) {
     if (!in_branch_mode_) {
       in_branch_mode_ = true;
       branch_selection_counter_ = 0;
-      std::cout << "[Selector] Branch detected at y=" << y << " with "
-                << segments.size() << " segments" << std::endl;
     }
   } else if (segments.size() <= 1 && in_branch_mode_) {
     in_branch_mode_ = false;
-    std::cout << "[Selector] Branch ended at y=" << y << std::endl;
   }
 }
 
