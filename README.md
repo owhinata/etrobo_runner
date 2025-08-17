@@ -1,4 +1,4 @@
-# etrobo_line_detector
+# etrobo_runner
 
 A ROS 2 C++ node that detects straight lines using Canny + Hough transform and publishes both the detection results and a visualization image. Includes a Python GUI tool for real-time parameter tuning.
 
@@ -29,7 +29,7 @@ A ROS 2 C++ node that detects straight lines using Canny + Hough transform and p
 Run the following at the workspace root:
 
 ```
-colcon build --packages-select etrobo_line_detector
+colcon build --packages-select etrobo_runner
 source install/setup.bash
 ```
 
@@ -37,12 +37,12 @@ source install/setup.bash
 
 ### Basic Usage
 ```bash
-ros2 run etrobo_line_detector etrobo_line_detector
+ros2 run etrobo_runner etrobo_line_detector
 ```
 
 ### With Parameters
 ```bash
-ros2 run etrobo_line_detector etrobo_line_detector \
+ros2 run etrobo_runner etrobo_line_detector \
   --ros-args \
   -p image_topic:=/camera/image_raw \
   -p camera_info_topic:=/camera/camera_info \
@@ -56,7 +56,7 @@ Launch the interactive parameter tuning GUI (requires image output enabled):
 
 ```bash
 # Terminal 1: Start line detector with image output
-ros2 run etrobo_line_detector etrobo_line_detector --ros-args -p publish_image_with_lines:=true
+ros2 run etrobo_runner etrobo_line_detector --ros-args -p publish_image_with_lines:=true
 
 # Terminal 2: Start GUI
 cd /path/to/etrobo_line_detector
@@ -68,7 +68,7 @@ For gray disk detection issues during calibration, use the GUI's **Calibration**
 
 ```bash
 # Start node with continuous calibration (no timeout)
-ros2 run etrobo_line_detector etrobo_line_detector \
+ros2 run etrobo_runner etrobo_line_detector \
   --ros-args \
   -p publish_image_with_lines:=true \
   -p calib_timeout_sec:=0.0
@@ -96,14 +96,14 @@ The line detector includes temporal contour tracking with Kalman filtering. For 
 
 ```bash
 # For curves and complex tracks (more adaptive tracking)
-ros2 run etrobo_line_detector etrobo_line_detector --ros-args \
+ros2 run etrobo_runner etrobo_line_detector --ros-args \
   -p tracker_process_noise:=0.02 \
   -p tracker_measurement_noise:=0.03 \
   -p tracker_speed_threshold:=3.0 \
   -p tracker_max_distance:=100.0
 
 # For straight tracks (more stable tracking)
-ros2 run etrobo_line_detector etrobo_line_detector --ros-args \
+ros2 run etrobo_runner etrobo_line_detector --ros-args \
   -p tracker_process_noise:=0.005 \
   -p tracker_measurement_noise:=0.08 \
   -p tracker_speed_threshold:=7.0 \

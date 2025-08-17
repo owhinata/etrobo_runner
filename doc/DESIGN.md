@@ -1,4 +1,4 @@
-# etrobo_line_detector Design Overview
+# etrobo_runner Design Overview
 
 ## Overview
 - Node name: `etrobo_line_detector`

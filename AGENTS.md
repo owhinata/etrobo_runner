@@ -45,7 +45,7 @@ For simulation:
 ## Building
 Use the following command to build the package:
 ```bash
-colcon build --packages-select etrobo_line_detector \
+colcon build --packages-select etrobo_runner \
 --build-base ../../build \
 --install-base ../../install
 ```

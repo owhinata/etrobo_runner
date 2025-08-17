@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>etrobo_line_detector</name>
+  <name>etrobo_runner</name>
   <version>0.0.0</version>
-  <description>etrobo_line_detector</description>
+  <description>etrobo_runner</description>
   <maintainer email="d2p.yggdrasill@gmail.com">KatsumiOuwa</maintainer>
   <license>MIT</license>
 
