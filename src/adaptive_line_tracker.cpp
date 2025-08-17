@@ -417,6 +417,21 @@ bool AdaptiveLineTracker::Impl::process_frame(
   auto contour_scores =
       collect_and_score_contours(black_mask, contours, contour_segments);
 
+  // Find the highest scoring contour
+  result.best_contour_id = -1;
+  result.best_contour_score = 0.0;
+  result.best_contour.clear();
+
+  for (const auto& [contour_id, score] : contour_scores) {
+    if (score.weighted_score > result.best_contour_score) {
+      result.best_contour_score = score.weighted_score;
+      result.best_contour_id = contour_id;
+      if (contour_id >= 0 && contour_id < static_cast<int>(contours.size())) {
+        result.best_contour = contours[contour_id];
+      }
+    }
+  }
+
   // Step 4: Build TrackedLine structures using scoring
   result.tracked_lines =
       build_tracked_lines(contour_segments, contour_scores, contours);
@@ -801,6 +816,24 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
         cv::line(img, centroid_offset, pred_offset, contour_color, 1);
       }
     }
+  }
+
+  // Draw the highest scoring contour with a special highlight
+  if (last_result_.best_contour_id >= 0 && !last_result_.best_contour.empty()) {
+    // Create offset contour for correct positioning
+    std::vector<std::vector<cv::Point>> best_contour_to_draw;
+    std::vector<cv::Point> offset_best_contour;
+    for (const auto& pt : last_result_.best_contour) {
+      offset_best_contour.push_back(
+          cv::Point(pt.x + roi_rect.x, pt.y + roi_rect.y));
+    }
+    best_contour_to_draw.push_back(offset_best_contour);
+
+    // Draw with thick white outline first
+    cv::drawContours(img, best_contour_to_draw, 0, cv::Scalar(255, 255, 255),
+                     4);
+    // Then draw with bright green color
+    cv::drawContours(img, best_contour_to_draw, 0, cv::Scalar(0, 255, 0), 2);
   }
 
   // Draw tracked points with different colors for different contours

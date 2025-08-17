@@ -26,8 +26,11 @@ class AdaptiveLineTracker {
     int total_scans;                         // Total scan lines processed
     int successful_detections;               // Scans with detected segments
     int total_contours;                      // Total contours found
-    int valid_contours;               // Valid contours (area >= threshold)
-    std::vector<int> segment_counts;  // Segment count per valid contour
+    int valid_contours;                   // Valid contours (area >= threshold)
+    std::vector<int> segment_counts;      // Segment count per valid contour
+    int best_contour_id = -1;             // ID of highest scoring contour
+    double best_contour_score = 0.0;      // Score of highest scoring contour
+    std::vector<cv::Point> best_contour;  // Points of highest scoring contour
   };
 
   explicit AdaptiveLineTracker(LineDetectorNode* node);
