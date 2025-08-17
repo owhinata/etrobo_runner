@@ -177,6 +177,12 @@ class LineDetectorParameterGUI:
                 "blue_lower_v": {"type": "int", "default": 50, "min": 0, "max": 255},
                 "blue_upper_v": {"type": "int", "default": 255, "min": 0, "max": 255}
             },
+            "Gray Disk Detection": {
+                "gray_detection_enabled": {"type": "bool", "default": True},
+                "gray_upper_s": {"type": "int", "default": 16, "min": 0, "max": 255},
+                "gray_lower_v": {"type": "int", "default": 100, "min": 0, "max": 255},
+                "gray_upper_v": {"type": "int", "default": 168, "min": 0, "max": 255}
+            },
             "Line Tracking": {
                 "line_scan_step": {"type": "int", "default": 5, "min": 1, "max": 20},
                 "min_line_width": {"type": "double", "default": 6.0, "min": 1.0, "max": 50.0},

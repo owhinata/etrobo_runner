@@ -127,6 +127,12 @@ class AdaptiveLineTracker::Impl {
   int blue_lower_v_{50};  // Minimum value for blue
   int blue_upper_v_{255};
 
+  // HSV parameters for gray disk detection
+  bool gray_detection_enabled_{true};
+  int gray_upper_s_{16};   // Low saturation for gray (0-16)
+  int gray_lower_v_{100};  // Minimum brightness for gray disk
+  int gray_upper_v_{168};  // Maximum brightness for gray disk
+
   // ROI for processing
   std::vector<int64_t> roi_;
 
@@ -220,6 +226,16 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   blue_upper_s_ = node_->declare_parameter<int>("blue_upper_s", 255);
   blue_lower_v_ = node_->declare_parameter<int>("blue_lower_v", 50);
   blue_upper_v_ = node_->declare_parameter<int>("blue_upper_v", 255);
+
+  // Gray disk detection parameters (based on CameraCalibrator settings)
+  gray_detection_enabled_ =
+      node_->declare_parameter<bool>("gray_detection_enabled", true);
+  gray_upper_s_ = node_->declare_parameter<int>("gray_upper_s",
+                                                16);  // Low saturation for gray
+  gray_lower_v_ =
+      node_->declare_parameter<int>("gray_lower_v", 100);  // Min brightness
+  gray_upper_v_ =
+      node_->declare_parameter<int>("gray_upper_v", 168);  // Max brightness
 
   // Tracking parameters
   bool tracker_enabled =
@@ -362,6 +378,18 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     return true;
   } else if (name == "blue_upper_v") {
     blue_upper_v_ = param.as_int();
+    return true;
+  } else if (name == "gray_detection_enabled") {
+    gray_detection_enabled_ = param.as_bool();
+    return true;
+  } else if (name == "gray_upper_s") {
+    gray_upper_s_ = param.as_int();
+    return true;
+  } else if (name == "gray_lower_v") {
+    gray_lower_v_ = param.as_int();
+    return true;
+  } else if (name == "gray_upper_v") {
+    gray_upper_v_ = param.as_int();
     return true;
   }
 
@@ -891,6 +919,9 @@ cv::Mat AdaptiveLineTracker::Impl::extract_line_regions(const cv::Mat& img) {
   cv::inRange(hsv, cv::Scalar(0, hsv_lower_s_, 0),
               cv::Scalar(180, hsv_upper_s_, hsv_upper_v_), black_mask);
 
+  // Start with black mask
+  combined_mask = black_mask.clone();
+
   // Extract blue regions if enabled
   if (blue_detection_enabled_) {
     cv::Mat blue_mask;
@@ -898,10 +929,19 @@ cv::Mat AdaptiveLineTracker::Impl::extract_line_regions(const cv::Mat& img) {
                 cv::Scalar(blue_upper_h_, blue_upper_s_, blue_upper_v_),
                 blue_mask);
 
-    // Combine black and blue masks
-    cv::bitwise_or(black_mask, blue_mask, combined_mask);
-  } else {
-    combined_mask = black_mask.clone();
+    // Combine with existing mask
+    cv::bitwise_or(combined_mask, blue_mask, combined_mask);
+  }
+
+  // Extract gray regions (gray disk) if enabled
+  if (gray_detection_enabled_) {
+    cv::Mat gray_mask;
+    // Gray: Any hue, low saturation, specific brightness range
+    cv::inRange(hsv, cv::Scalar(0, 0, gray_lower_v_),
+                cv::Scalar(180, gray_upper_s_, gray_upper_v_), gray_mask);
+
+    // Combine with existing mask
+    cv::bitwise_or(combined_mask, gray_mask, combined_mask);
   }
 
   // Apply morphological operations to clean up
