@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Run clang-format on staged C/C++ files, then restage them
+root="$(git rev-parse --show-toplevel)"
+cd "$root"
+
+changed=$(git diff --cached --name-only --diff-filter=ACM | \
+  grep -E '\.(c|cc|cpp|cxx|h|hh|hpp|hxx)$' || true)
+
+if [ -z "$changed" ]; then
+  exit 0
+fi
+
+if ! command -v clang-format >/dev/null 2>&1; then
+  echo "[pre-commit] clang-format not found; skipping formatting." >&2
+  exit 0
+fi
+
+for f in $changed; do
+  if [ -f "$f" ]; then
+    clang-format -i "$f"
+    git add "$f"
+  fi
+done
+
+exit 0
+
