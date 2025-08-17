@@ -249,9 +249,10 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   int merger_prediction_frames =
       node_->declare_parameter<int>("merger_prediction_frames", 5);
   double merger_trajectory_threshold =
-      node_->declare_parameter<double>("merger_trajectory_threshold", 30.0);
+      node_->declare_parameter<double>("merger_trajectory_threshold", 50.0);
   double merger_confidence =
       node_->declare_parameter<double>("merger_confidence", 0.7);
+  bool merger_debug = node_->declare_parameter<bool>("merger_debug", false);
 
   // Configure tracker with parameters
   if (contour_tracker_) {
@@ -277,6 +278,7 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
     merge_config.prediction_frames = merger_prediction_frames;
     merge_config.trajectory_threshold = merger_trajectory_threshold;
     merge_config.merge_confidence = merger_confidence;
+    merge_config.debug_enabled = merger_debug;
     line_merger_->set_config(merge_config);
   }
 
@@ -423,6 +425,9 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     } else if (name == "merger_confidence") {
       config.merge_confidence = param.as_double();
       updated = true;
+    } else if (name == "merger_debug") {
+      config.debug_enabled = param.as_bool();
+      updated = true;
     }
 
     if (updated) {
@@ -484,20 +489,32 @@ bool AdaptiveLineTracker::Impl::process_frame(
 
   // Apply line merging if enabled
   std::vector<std::vector<cv::Point>> contours;
+  std::map<int, std::set<int>>
+      contour_to_ids;  // Map from contour index to original tracker IDs
+
   if (line_merger_ && line_merger_->get_config().enabled) {
     // Get merged contours
     contours = line_merger_->merge_lines(all_tracked);
+    contour_to_ids = line_merger_->get_merged_id_mapping();
 
     // Log merge information
     auto merge_groups = line_merger_->get_merge_groups();
     if (!merge_groups.empty()) {
       for (const auto& [group_id, members] : merge_groups) {
         if (members.size() > 1) {
-          std::string merge_info = "Merged: {";
+          std::string merge_info = "Merged IDs: {";
           for (int id : members) {
             merge_info += std::to_string(id) + ",";
           }
           merge_info.back() = '}';
+          merge_info += " -> Contour ";
+          // Find which result index contains these IDs
+          for (const auto& [idx, ids] : contour_to_ids) {
+            if (ids == members) {
+              merge_info += std::to_string(idx);
+              break;
+            }
+          }
           RCLCPP_DEBUG(node_->get_logger(), "%s", merge_info.c_str());
         }
       }
@@ -506,9 +523,12 @@ bool AdaptiveLineTracker::Impl::process_frame(
     // Filter tracked contours by area and missed frames (original behavior)
     constexpr double MIN_CONTOUR_AREA = 20.0;
     contours.reserve(all_tracked.size());
+    int idx = 0;
     for (const auto& [id, tracked] : all_tracked) {
       if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
         contours.push_back(tracked.contour);
+        contour_to_ids[idx] = {id};  // Single ID for unmerged contour
+        idx++;
       }
     }
   }
@@ -518,10 +538,43 @@ bool AdaptiveLineTracker::Impl::process_frame(
   auto contour_scores =
       collect_and_score_contours(black_mask, contours, contour_segments);
 
+  // If merging is enabled, combine scores for merged contours
+  if (!contour_to_ids.empty() && line_merger_ &&
+      line_merger_->get_config().enabled) {
+    // Create a map from original ID to contour index
+    std::map<int, int> id_to_contour_idx;
+    for (const auto& [idx, ids] : contour_to_ids) {
+      for (int id : ids) {
+        id_to_contour_idx[id] = idx;
+      }
+    }
+
+    // For merged contours, combine their scores
+    for (const auto& [idx, ids] : contour_to_ids) {
+      if (ids.size() > 1) {
+        // This is a merged contour - the score should already be calculated
+        // But we should log it for debugging
+        auto score_it = contour_scores.find(idx);
+        if (score_it != contour_scores.end()) {
+          std::string merge_score_info =
+              "Merged contour " + std::to_string(idx) + " (IDs: ";
+          for (int id : ids) {
+            merge_score_info += std::to_string(id) + "+";
+          }
+          if (!ids.empty()) merge_score_info.pop_back();  // Remove last '+'
+          merge_score_info +=
+              ") score: " + std::to_string(score_it->second.weighted_score);
+          RCLCPP_DEBUG(node_->get_logger(), "%s", merge_score_info.c_str());
+        }
+      }
+    }
+  }
+
   // Find the highest scoring contour
   result.best_contour_id = -1;
   result.best_contour_score = 0.0;
   result.best_contour.clear();
+  std::set<int> best_merged_ids;  // Store merged IDs for best contour
 
   for (const auto& [contour_id, score] : contour_scores) {
     if (score.weighted_score > result.best_contour_score) {
@@ -529,13 +582,45 @@ bool AdaptiveLineTracker::Impl::process_frame(
       result.best_contour_id = contour_id;
       if (contour_id >= 0 && contour_id < static_cast<int>(contours.size())) {
         result.best_contour = contours[contour_id];
+        // Store merged IDs if available
+        auto it = contour_to_ids.find(contour_id);
+        if (it != contour_to_ids.end()) {
+          best_merged_ids = it->second;
+        } else {
+          best_merged_ids.clear();
+        }
       }
     }
+  }
+
+  // Log the best contour with merged IDs
+  if (result.best_contour_id >= 0 && !best_merged_ids.empty() &&
+      best_merged_ids.size() > 1) {
+    std::string best_info = "Best contour: ID:";
+    for (int id : best_merged_ids) {
+      best_info += std::to_string(id) + "+";
+    }
+    if (!best_merged_ids.empty()) best_info.pop_back();  // Remove last '+'
+    best_info += " (score: " + std::to_string(result.best_contour_score) + ")";
+    RCLCPP_DEBUG(node_->get_logger(), "%s", best_info.c_str());
   }
 
   // Step 4: Build TrackedLine structures using scoring
   result.tracked_lines =
       build_tracked_lines(contour_segments, contour_scores, contours);
+
+  // Update TrackedLine IDs to show merged IDs
+  if (!contour_to_ids.empty()) {
+    for (auto& line : result.tracked_lines) {
+      auto it = contour_to_ids.find(line.contour_id);
+      if (it != contour_to_ids.end() && !it->second.empty()) {
+        // Store all merged IDs
+        line.merged_ids = it->second;
+        // Use the first original ID as the main ID
+        line.contour_id = *it->second.begin();
+      }
+    }
+  }
 
   // Step 5: Populate statistics for result
   result.total_contours = all_contours.size();
@@ -842,14 +927,15 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
   cv::Rect roi_rect = valid_roi(img);
   cv::rectangle(img, roi_rect, cv::Scalar(255, 255, 0), 1);
 
-  // Use black mask as background if show_mask is enabled
+  // Overlay black mask semi-transparently if show_mask is enabled
   if (show_mask_ && !last_black_mask_.empty()) {
     // Convert grayscale mask to BGR
     cv::Mat mask_bgr;
     cv::cvtColor(last_black_mask_, mask_bgr, cv::COLOR_GRAY2BGR);
 
-    // Copy the mask to the ROI region as background
-    mask_bgr.copyTo(img(roi_rect));
+    // Blend mask with original image (semi-transparent overlay)
+    cv::Mat roi_img = img(roi_rect);
+    cv::addWeighted(roi_img, 0.5, mask_bgr, 0.5, 0, roi_img);
   }
 
   // Draw contours if enabled (on top of mask if present)
@@ -890,7 +976,7 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
           break;  // Purple
       }
 
-      cv::drawContours(img, contour_to_draw, 0, contour_color, 2);
+      cv::drawContours(img, contour_to_draw, 0, contour_color, 1);
 
       // Draw ID and tracking info
       cv::Point2f centroid_offset(tracked_contour.centroid.x + roi_rect.x,
@@ -899,9 +985,32 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
       // Draw centroid
       cv::circle(img, centroid_offset, 4, contour_color, -1);
 
-      // Draw ID text
+      // Draw ID text - check if this ID is part of a merged group
       std::string text = "ID:" + std::to_string(id);
-      if (tracked_contour.age > 1) {
+
+      // Check if this ID is merged with others
+      bool is_merged = false;
+      std::set<int> merged_ids;
+      if (line_merger_ && line_merger_->get_config().enabled) {
+        auto merge_groups = line_merger_->get_merge_groups();
+        for (const auto& [group_id, members] : merge_groups) {
+          if (members.size() > 1 && members.find(id) != members.end()) {
+            // This ID is part of a merged group - show all IDs
+            text = "ID:";
+            bool first = true;
+            for (int mid : members) {
+              if (!first) text += "+";
+              text += std::to_string(mid);
+              first = false;
+            }
+            is_merged = true;
+            merged_ids = members;
+            break;
+          }
+        }
+      }
+
+      if (tracked_contour.age > 1 && !is_merged) {
         text += " (" + std::to_string(tracked_contour.age) + ")";
       }
       cv::putText(img, text,
@@ -930,11 +1039,11 @@ void AdaptiveLineTracker::Impl::draw_visualization_overlay(cv::Mat& img) const {
     }
     best_contour_to_draw.push_back(offset_best_contour);
 
-    // Draw with thick white outline first
+    // Draw with thin white outline first
     cv::drawContours(img, best_contour_to_draw, 0, cv::Scalar(255, 255, 255),
-                     4);
+                     2);
     // Then draw with bright green color
-    cv::drawContours(img, best_contour_to_draw, 0, cv::Scalar(0, 255, 0), 2);
+    cv::drawContours(img, best_contour_to_draw, 0, cv::Scalar(0, 255, 0), 1);
   }
 
   // Draw tracked points with different colors for different contours

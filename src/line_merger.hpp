@@ -30,6 +30,13 @@ class LineMerger {
     float trajectory_threshold =
         30.0f;                      // Threshold for trajectory intersection
     float merge_confidence = 0.7f;  // Minimum confidence for merging
+    float vertical_gap_multiplier =
+        2.0f;  // Multiplier for vertical gap threshold
+    float static_distance_multiplier =
+        1.5f;  // Multiplier for static distance check
+
+    // Debug parameters
+    bool debug_enabled = false;  // Enable debug output
   };
 
   struct LineSegment {
@@ -63,6 +70,11 @@ class LineMerger {
   std::vector<std::vector<cv::Point>> merge_lines(
       const std::map<int, ContourTracker::TrackedContour>& tracked_contours);
 
+  // Get mapping from merged contour index to original IDs
+  std::map<int, std::set<int>> get_merged_id_mapping() const {
+    return merged_id_mapping_;
+  }
+
   // Get merge groups (for visualization)
   std::map<int, std::set<int>> get_merge_groups() const {
     return merge_groups_;
@@ -71,6 +83,8 @@ class LineMerger {
  private:
   MergeConfig config_;
   std::map<int, std::set<int>> merge_groups_;  // Groups of merged line IDs
+  std::map<int, std::set<int>>
+      merged_id_mapping_;  // Map from result index to original IDs
 
   // Method 1+2: Direction and Endpoint based merging
   std::vector<MergeCandidate> find_merge_candidates_direction(
@@ -99,6 +113,19 @@ class LineMerger {
   std::vector<cv::Point> merge_point_sets(
       const std::vector<std::vector<cv::Point>>& point_sets);
   void sort_points_along_line(std::vector<cv::Point>& points);
+
+  // Line continuity checks
+  bool check_line_continuity(const ContourTracker::TrackedContour& contour1,
+                             const ContourTracker::TrackedContour& contour2);
+  cv::Vec4f fit_line_to_contour(const std::vector<cv::Point>& contour);
+  float point_to_line_distance(const cv::Point2f& point, const cv::Vec4f& line);
+  bool are_lines_collinear(const cv::Vec4f& line1, const cv::Vec4f& line2,
+                           float angle_threshold, float distance_threshold);
+  cv::Point2f project_point_on_line(const cv::Point2f& point,
+                                    const cv::Vec4f& line);
+  float get_gap_between_lines(const std::vector<cv::Point>& contour1,
+                              const std::vector<cv::Point>& contour2,
+                              const cv::Vec4f& line1, const cv::Vec4f& line2);
 };
 
 #endif  // LINE_MERGER_HPP_

@@ -16,6 +16,7 @@ class AdaptiveLineTracker {
     int contour_id;                   // Contour index
     std::vector<cv::Point2d> points;  // Segment points for this contour
     double area;                      // Contour area
+    std::set<int> merged_ids;         // Original IDs if merged
 
     TrackedLine(int id = -1, double a = 0.0) : contour_id(id), area(a) {}
   };
