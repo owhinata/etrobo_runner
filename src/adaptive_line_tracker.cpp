@@ -11,6 +11,7 @@
 
 #include "src/contour_tracker.hpp"
 #include "src/line_detector_node.hpp"
+#include "src/line_merger.hpp"
 
 // Implementation class
 class AdaptiveLineTracker::Impl {
@@ -137,6 +138,9 @@ class AdaptiveLineTracker::Impl {
 
   // Contour tracker for temporal tracking
   std::unique_ptr<ContourTracker> contour_tracker_;
+
+  // Line merger for combining similar lines
+  std::unique_ptr<LineMerger> line_merger_;
 };
 
 // AdaptiveLineTracker
@@ -180,6 +184,9 @@ AdaptiveLineTracker::Impl::Impl(LineDetectorNode* node) : node_(node) {
   contour_tracker_->set_max_missed_frames(5);
   contour_tracker_->set_max_distance_threshold(75.0);  // Increased for curves
   contour_tracker_->set_min_contour_area(20.0);
+
+  // Initialize line merger
+  line_merger_ = std::make_unique<LineMerger>();
 }
 
 void AdaptiveLineTracker::Impl::reset() {
@@ -229,6 +236,23 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
   double tracker_speed_threshold =
       node_->declare_parameter<double>("tracker_speed_threshold", 5.0);
 
+  // Line merger parameters
+  bool merger_enabled = node_->declare_parameter<bool>("merger_enabled", false);
+  std::string merger_method = node_->declare_parameter<std::string>(
+      "merger_method", "direction_endpoint");
+  double merger_max_angle =
+      node_->declare_parameter<double>("merger_max_angle_diff", 20.0);
+  double merger_max_endpoint_dist =
+      node_->declare_parameter<double>("merger_max_endpoint_dist", 50.0);
+  double merger_min_line_length =
+      node_->declare_parameter<double>("merger_min_line_length", 30.0);
+  int merger_prediction_frames =
+      node_->declare_parameter<int>("merger_prediction_frames", 5);
+  double merger_trajectory_threshold =
+      node_->declare_parameter<double>("merger_trajectory_threshold", 30.0);
+  double merger_confidence =
+      node_->declare_parameter<double>("merger_confidence", 0.7);
+
   // Configure tracker with parameters
   if (contour_tracker_) {
     contour_tracker_->set_enabled(tracker_enabled);
@@ -238,6 +262,22 @@ void AdaptiveLineTracker::Impl::declare_parameters() {
     contour_tracker_->set_process_noise(tracker_process_noise);
     contour_tracker_->set_measurement_noise(tracker_measurement_noise);
     contour_tracker_->set_speed_threshold(tracker_speed_threshold);
+  }
+
+  // Configure line merger with parameters
+  if (line_merger_) {
+    LineMerger::MergeConfig merge_config;
+    merge_config.enabled = merger_enabled;
+    merge_config.method = (merger_method == "kalman_graph")
+                              ? LineMerger::MergeMethod::KALMAN_GRAPH
+                              : LineMerger::MergeMethod::DIRECTION_ENDPOINT;
+    merge_config.max_angle_diff = merger_max_angle;
+    merge_config.max_endpoint_dist = merger_max_endpoint_dist;
+    merge_config.min_line_length = merger_min_line_length;
+    merge_config.prediction_frames = merger_prediction_frames;
+    merge_config.trajectory_threshold = merger_trajectory_threshold;
+    merge_config.merge_confidence = merger_confidence;
+    line_merger_->set_config(merge_config);
   }
 
   // Line tracking configuration parameters
@@ -351,6 +391,46 @@ bool AdaptiveLineTracker::Impl::try_update_parameter(
     return true;
   }
 
+  // Line merger parameter updates
+  if (line_merger_) {
+    LineMerger::MergeConfig config = line_merger_->get_config();
+    bool updated = false;
+
+    if (name == "merger_enabled") {
+      config.enabled = param.as_bool();
+      updated = true;
+    } else if (name == "merger_method") {
+      std::string method = param.as_string();
+      config.method = (method == "kalman_graph")
+                          ? LineMerger::MergeMethod::KALMAN_GRAPH
+                          : LineMerger::MergeMethod::DIRECTION_ENDPOINT;
+      updated = true;
+    } else if (name == "merger_max_angle_diff") {
+      config.max_angle_diff = param.as_double();
+      updated = true;
+    } else if (name == "merger_max_endpoint_dist") {
+      config.max_endpoint_dist = param.as_double();
+      updated = true;
+    } else if (name == "merger_min_line_length") {
+      config.min_line_length = param.as_double();
+      updated = true;
+    } else if (name == "merger_prediction_frames") {
+      config.prediction_frames = param.as_int();
+      updated = true;
+    } else if (name == "merger_trajectory_threshold") {
+      config.trajectory_threshold = param.as_double();
+      updated = true;
+    } else if (name == "merger_confidence") {
+      config.merge_confidence = param.as_double();
+      updated = true;
+    }
+
+    if (updated) {
+      line_merger_->set_config(config);
+      return true;
+    }
+  }
+
   return false;
 }
 
@@ -402,13 +482,34 @@ bool AdaptiveLineTracker::Impl::process_frame(
     RCLCPP_DEBUG(node_->get_logger(), "%s", tracking_info.c_str());
   }
 
-  // Filter tracked contours by area and missed frames
-  constexpr double MIN_CONTOUR_AREA = 20.0;
+  // Apply line merging if enabled
   std::vector<std::vector<cv::Point>> contours;
-  contours.reserve(all_tracked.size());
-  for (const auto& [id, tracked] : all_tracked) {
-    if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
-      contours.push_back(tracked.contour);
+  if (line_merger_ && line_merger_->get_config().enabled) {
+    // Get merged contours
+    contours = line_merger_->merge_lines(all_tracked);
+
+    // Log merge information
+    auto merge_groups = line_merger_->get_merge_groups();
+    if (!merge_groups.empty()) {
+      for (const auto& [group_id, members] : merge_groups) {
+        if (members.size() > 1) {
+          std::string merge_info = "Merged: {";
+          for (int id : members) {
+            merge_info += std::to_string(id) + ",";
+          }
+          merge_info.back() = '}';
+          RCLCPP_DEBUG(node_->get_logger(), "%s", merge_info.c_str());
+        }
+      }
+    }
+  } else {
+    // Filter tracked contours by area and missed frames (original behavior)
+    constexpr double MIN_CONTOUR_AREA = 20.0;
+    contours.reserve(all_tracked.size());
+    for (const auto& [id, tracked] : all_tracked) {
+      if (tracked.area >= MIN_CONTOUR_AREA && tracked.missed_frames == 0) {
+        contours.push_back(tracked.contour);
+      }
     }
   }
 
